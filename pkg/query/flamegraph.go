@@ -1,4 +1,4 @@
-// Copyright 2022 The Parca Authors
+// Copyright 2022-2025 The Parca Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -87,6 +87,12 @@ func (fgi *FlamegraphIterator) At() *querypb.FlamegraphNode {
 	return peekNode.Children[fgi.stack.Peek().currentChild]
 }
 
+func (fgi *FlamegraphIterator) AtParent() *querypb.FlamegraphNode {
+	peekNodes := fgi.stack.Peek().nodes
+	peekNode := peekNodes[len(peekNodes)-1]
+	return peekNode
+}
+
 func (fgi *FlamegraphIterator) StepInto() bool {
 	peekNodes := fgi.stack.Peek().nodes
 	peekNode := peekNodes[len(peekNodes)-1]
@@ -120,6 +126,7 @@ func aggregateByFunction(fg *querypb.Flamegraph) *querypb.Flamegraph {
 
 	it := NewFlamegraphIterator(oldRootNode)
 	tree := &querypb.Flamegraph{
+		//nolint:staticcheck // SA1019: Fow now we want to support these APIs
 		Total:  fg.Total,
 		Height: fg.Height,
 		Root: &querypb.FlamegraphRootNode{
@@ -286,7 +293,7 @@ func linesToTreeNodes(
 
 	// Same as locations, lines are in order from deepest to highest in the
 	// stack. Therefore we start with the innermost, and work ourselves
-	// outwards. We want the result to be from higest to deepest to be inserted
+	// outwards. We want the result to be from highest to deepest to be inserted
 	// into our flamegraph at our "current" position that's calling
 	// linesToTreeNodes.
 	for i := 0; i < len(lines); i++ {
@@ -317,7 +324,7 @@ func lineToTreeNode(
 	if mapping != nil {
 		mappingID = mapping.Id
 	}
-	return &querypb.FlamegraphNode{
+	node := &querypb.FlamegraphNode{
 		Meta: &querypb.FlamegraphNodeMeta{
 			Location: &pb.Location{
 				Id:        location.ID,
@@ -325,13 +332,18 @@ func lineToTreeNode(
 				Address:   location.Address,
 				IsFolded:  location.IsFolded,
 			},
-			Function: line.Function,
 			Line: &pb.Line{
-				FunctionId: line.Function.Id,
-				Line:       line.Line,
+				Line: line.Line,
 			},
 			Mapping: mapping,
 		},
 		Children: children,
 	}
+
+	if line.Function != nil {
+		node.Meta.Function = line.Function
+		node.Meta.Line.FunctionId = line.Function.Id
+	}
+
+	return node
 }

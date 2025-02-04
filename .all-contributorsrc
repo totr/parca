@@ -339,8 +339,99 @@
       "contributions": [
         "doc"
       ]
+    },
+    {
+      "login": "ShubhamPalriwala",
+      "name": "Shubham Palriwala",
+      "avatar_url": "https://avatars.githubusercontent.com/u/55556994?v=4",
+      "profile": "https://github.com/ShubhamPalriwala",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "fabxc",
+      "name": "Fabian Reinartz",
+      "avatar_url": "https://avatars.githubusercontent.com/u/4948210?v=4",
+      "profile": "https://github.com/fabxc",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "karthick3018",
+      "name": "Karthick Raja",
+      "avatar_url": "https://avatars.githubusercontent.com/u/47154512?v=4",
+      "profile": "https://github.com/karthick3018",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "quite4work",
+      "name": "quite4work",
+      "avatar_url": "https://avatars.githubusercontent.com/u/58137382?v=4",
+      "profile": "https://github.com/quite4work",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "albertlockett",
+      "name": "Bert",
+      "avatar_url": "https://avatars.githubusercontent.com/u/5846846?v=4",
+      "profile": "https://albertlockett.ca",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "themohammadsa",
+      "name": "Mohammad S",
+      "avatar_url": "https://avatars.githubusercontent.com/u/59393936?v=4",
+      "profile": "https://github.com/themohammadsa",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "susarlanikhilesh",
+      "name": "Nikhilesh Susarla",
+      "avatar_url": "https://avatars.githubusercontent.com/u/4359080?v=4",
+      "profile": "https://github.com/susarlanikhilesh",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "Franqsanz",
+      "name": "Franco Sánchez",
+      "avatar_url": "https://avatars.githubusercontent.com/u/44296203?v=4",
+      "profile": "https://github.com/Franqsanz",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "ilpianista",
+      "name": "Andrea Scarpino",
+      "avatar_url": "https://avatars.githubusercontent.com/u/529436?v=4",
+      "profile": "https://scarpino.dev",
+      "contributions": [
+        "doc"
+      ]
+    },
+    {
+      "login": "nabokihms",
+      "name": "Maksim Nabokikh",
+      "avatar_url": "https://avatars.githubusercontent.com/u/32434187?v=4",
+      "profile": "https://github.com/nabokihms",
+      "contributions": [
+        "code"
+      ]
     }
   ],
   "contributorsPerLine": 5,
-  "skipCi": true
+  "skipCi": true,
+  "commitType": "docs"
 }

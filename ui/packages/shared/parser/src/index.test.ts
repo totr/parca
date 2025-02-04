@@ -11,7 +11,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import {MatcherType, Matcher, Query, ProfileType} from './index';
+import {expect, test} from 'vitest';
+
+import {Matcher, MatcherTypes, ProfileType, Query} from './index';
 
 test('QueryParseEmpty', () => {
   expect(Query.parse('')).toMatchObject(
@@ -29,7 +31,7 @@ test('QueryParseWithMatcher', () => {
   expect(Query.parse('memory:inuse_objects:count:space:bytes{instance="abc"}')).toMatchObject(
     new Query(
       new ProfileType('memory', 'inuse_objects', 'count', 'space', 'bytes', false),
-      [new Matcher('instance', MatcherType.MatchEqual, 'abc')],
+      [new Matcher('instance', MatcherTypes.MatchEqual, 'abc')],
       ''
     )
   );
@@ -38,6 +40,12 @@ test('QueryParseWithMatcher', () => {
 test('Query.toString', () => {
   expect(Query.parse('memory:inuse_objects:count:space:bytes{instance="abc"}').toString()).toBe(
     'memory:inuse_objects:count:space:bytes{instance="abc"}'
+  );
+});
+
+test('Query.toString With Comma', () => {
+  expect(Query.parse('memory:inuse_objects:count:space:bytes{instance="abc,def"}').toString()).toBe(
+    'memory:inuse_objects:count:space:bytes{instance="abc,def"}'
   );
 });
 
@@ -104,7 +112,7 @@ test('Parse Multiline query', () => {
   ).toMatchObject(
     new Query(
       new ProfileType('memory', 'alloc_objects', 'count', 'space', 'bytes', true),
-      [new Matcher('instance', MatcherType.MatchEqual, 'abc')],
+      [new Matcher('instance', MatcherTypes.MatchEqual, 'abc')],
       ''
     )
   );

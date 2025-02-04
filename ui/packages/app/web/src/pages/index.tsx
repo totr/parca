@@ -11,13 +11,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import {GrpcWebFetchTransport} from '@protobuf-ts/grpcweb-transport';
-import {QueryServiceClient} from '@parca/client';
-import {useLocation, useNavigate} from 'react-router-dom';
-import {parseParams, convertToQueryParams} from '@parca/functions';
-import {ProfileExplorer} from '@parca/profile';
+import {useCallback} from 'react';
 
-const apiEndpoint = process.env.REACT_APP_PUBLIC_API_ENDPOINT;
+import {GrpcWebFetchTransport} from '@protobuf-ts/grpcweb-transport';
+import {useLocation, useNavigate} from 'react-router-dom';
+
+import {QueryServiceClient} from '@parca/client';
+import {ParcaContextProvider, Spinner, URLStateProvider} from '@parca/components';
+import {DEFAULT_PROFILE_EXPLORER_PARAM_VALUES, ProfileExplorer} from '@parca/profile';
+import {selectDarkMode, useAppSelector} from '@parca/store';
+import {convertToQueryParams, parseParams} from '@parca/utilities';
+
+const apiEndpoint = import.meta.env.VITE_API_ENDPOINT;
 
 const queryClient = new QueryServiceClient(
   new GrpcWebFetchTransport({
@@ -28,18 +33,41 @@ const queryClient = new QueryServiceClient(
 const Profiles = () => {
   const location = useLocation();
   const navigate = useNavigate();
+  const isDarkMode = useAppSelector(selectDarkMode);
 
-  const navigateTo = (path: string, queryParams: any) => {
-    navigate({
-      pathname: path,
-      search: `?${convertToQueryParams(queryParams)}`,
-    });
-  };
+  const navigateTo = useCallback(
+    (_: string, queryParams: any, options?: {replace?: boolean}) => {
+      navigate(
+        {
+          search: `?${convertToQueryParams(queryParams)}`,
+        },
+        options ?? {}
+      );
+    },
+    [navigate]
+  );
 
   const queryParams = parseParams(location.search);
 
   return (
-    <ProfileExplorer queryClient={queryClient} queryParams={queryParams} navigateTo={navigateTo} />
+    <URLStateProvider navigateTo={navigateTo} defaultValues={DEFAULT_PROFILE_EXPLORER_PARAM_VALUES}>
+      <ParcaContextProvider
+        value={{
+          Spinner,
+          queryServiceClient: queryClient,
+          navigateTo,
+          isDarkMode,
+        }}
+      >
+        <div className="bg-white dark:bg-gray-900 p-3">
+          <ProfileExplorer
+            queryClient={queryClient}
+            queryParams={queryParams}
+            navigateTo={navigateTo}
+          />
+        </div>
+      </ParcaContextProvider>
+    </URLStateProvider>
   );
 };
 

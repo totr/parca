@@ -11,21 +11,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import {useQuery, UseQueryResult} from 'react-query';
+import {useQuery, type UseQueryResult} from '@tanstack/react-query';
 
 interface Props<IRes> {
-  key: string | any[];
+  key: unknown[];
   queryFn: () => Promise<IRes>;
   options?: {
     enabled?: boolean | undefined;
     staleTime?: number | undefined;
+    retry?: number | boolean;
+    keepPreviousData?: boolean | undefined;
   };
 }
 
 const useGrpcQuery = <IRes>({
   key,
   queryFn,
-  options: {enabled = true, staleTime} = {},
+  options: {enabled = true, staleTime, retry, keepPreviousData} = {},
 }: Props<IRes>): UseQueryResult<IRes> => {
   return useQuery<IRes>(
     key,
@@ -35,6 +37,8 @@ const useGrpcQuery = <IRes>({
     {
       enabled,
       staleTime,
+      retry,
+      keepPreviousData,
     }
   );
 };

@@ -1,4 +1,4 @@
-// Copyright 2022 The Parca Authors
+// Copyright 2022-2025 The Parca Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -15,7 +15,6 @@ package elfutils
 
 import (
 	"debug/dwarf"
-	"debug/elf"
 	"errors"
 	"fmt"
 	"io"
@@ -46,12 +45,7 @@ type debugInfoFile struct {
 }
 
 // NewDebugInfoFile creates a new DebugInfoFile symbolizer.
-func NewDebugInfoFile(f *elf.File, demangler *demangle.Demangler) (DebugInfoFile, error) {
-	debugData, err := f.DWARF()
-	if err != nil {
-		return nil, fmt.Errorf("failed to read DWARF data: %w", err)
-	}
-
+func NewDebugInfoFile(debugData *dwarf.Data, demangler *demangle.Demangler) (DebugInfoFile, error) {
 	return &debugInfoFile{
 		demangler: demangler,
 
@@ -75,7 +69,7 @@ func (f *debugInfoFile) SourceLines(addr uint64) ([]profile.LocationLine, error)
 	// and positions the reader to read the children of that unit.
 	cu, err := er.SeekPC(addr)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("seek to PC: %w", err)
 	}
 	if cu == nil {
 		return nil, errors.New("failed to find a corresponding dwarf entry for given address")
@@ -101,12 +95,19 @@ func (f *debugInfoFile) SourceLines(addr uint64) ([]profile.LocationLine, error)
 	if !ok {
 		name = ""
 	}
+
+	declLine, ok := tr.Entry.Val(dwarf.AttrDeclLine).(int64)
+	if !ok {
+		declLine = 0
+	}
+
 	file, line := findLineInfo(f.lineEntries[cu.Offset], tr.Ranges)
 	lines = append(lines, profile.LocationLine{
 		Line: line,
 		Function: f.demangler.Demangle(&pb.Function{
-			Name:     name,
-			Filename: file,
+			Name:      name,
+			Filename:  file,
+			StartLine: declLine,
 		}),
 	})
 
@@ -114,18 +115,27 @@ func (f *debugInfoFile) SourceLines(addr uint64) ([]profile.LocationLine, error)
 	for _, ch := range reader.InlineStack(tr, addr) {
 		var name string
 		if ch.Tag == dwarf.TagSubprogram {
-			name = tr.Entry.Val(dwarf.AttrName).(string)
+			name, ok = tr.Entry.Val(dwarf.AttrName).(string)
+			if !ok {
+				name = ""
+			}
 		} else {
 			abstractOrigin := f.abstractSubprograms[ch.Entry.Val(dwarf.AttrAbstractOrigin).(dwarf.Offset)]
 			name = getFunctionName(abstractOrigin)
+		}
+
+		declLine, ok := ch.Entry.Val(dwarf.AttrDeclLine).(int64)
+		if !ok {
+			declLine = 0
 		}
 
 		file, line := findLineInfo(f.lineEntries[cu.Offset], ch.Ranges)
 		lines = append(lines, profile.LocationLine{
 			Line: line,
 			Function: f.demangler.Demangle(&pb.Function{
-				Name:     name,
-				Filename: file,
+				Name:      name,
+				Filename:  file,
+				StartLine: declLine,
 			}),
 		})
 	}
@@ -236,10 +246,14 @@ func findLineInfo(entries []dwarf.LineEntry, rg [][2]uint64) (string, int64) {
 
 func getFunctionName(entry *dwarf.Entry) string {
 	name := "?"
+	ok := false
 	if entry != nil {
 		for _, field := range entry.Field {
 			if field.Attr == dwarf.AttrName {
-				name = field.Val.(string)
+				name, ok = field.Val.(string)
+				if !ok {
+					name = "?"
+				}
 			}
 		}
 	}

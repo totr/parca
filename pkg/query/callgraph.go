@@ -1,4 +1,4 @@
-// Copyright 2022 The Parca Authors
+// Copyright 2022-2025 The Parca Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -26,10 +26,10 @@ import (
 )
 
 const (
-	NodeCutOffFraction = 0.005
+	NodeCutOffFraction = float32(0.005)
 )
 
-func GenerateCallgraph(ctx context.Context, p *profile.Profile) (*querypb.Callgraph, error) {
+func GenerateCallgraph(ctx context.Context, p profile.OldProfile) (*querypb.Callgraph, error) {
 	nodesMap := make(map[string]*querypb.CallgraphNode)
 	nodes := make([]*querypb.CallgraphNode, 0)
 	edges := make([]*querypb.CallgraphEdge, 0)
@@ -129,7 +129,7 @@ func linesToCallgraphNodes(
 
 	// Same as locations, lines are in order from deepest to highest in the
 	// stack. Therefore we start with the innermost, and work ourselves
-	// outwards. We want the result to be from higest to deepest to be inserted
+	// outwards. We want the result to be from highest to deepest to be inserted
 	// into our callgraph at our "current" position that's calling
 	// linesToTreeNodes.
 	for i := 0; i < len(lines); i++ {
@@ -182,7 +182,7 @@ func prunableNodes(nodes []*querypb.CallgraphNode, c int64) []*querypb.Callgraph
 		return nodes[i].Cumulative > nodes[j].Cumulative
 	})
 	i := 0
-	cutoffValue := (float64(c) * NodeCutOffFraction)
+	cutoffValue := (float64(c) * float64(NodeCutOffFraction))
 	for ; i < len(nodes); i++ {
 		if float64(nodes[i].Cumulative) < cutoffValue {
 			break
@@ -192,6 +192,7 @@ func prunableNodes(nodes []*querypb.CallgraphNode, c int64) []*querypb.Callgraph
 }
 
 func pruneGraph(graph *querypb.Callgraph) *querypb.Callgraph {
+	//nolint:staticcheck // SA1019: This needs to be updated in a follow-up PR.
 	prunableNodes := prunableNodes(graph.Nodes, graph.Cumulative)
 	finalNodes := make([]*querypb.CallgraphNode, 0)
 	finalEdges := make([]*querypb.CallgraphEdge, 0)
@@ -268,6 +269,7 @@ func pruneGraph(graph *querypb.Callgraph) *querypb.Callgraph {
 	}
 	finalEdges = append(finalEdges, edgesToCreate...)
 
+	//nolint:staticcheck // SA1019: Fow now we want to support these APIs
 	return &querypb.Callgraph{Nodes: finalNodes, Edges: finalEdges, Cumulative: graph.Cumulative}
 }
 

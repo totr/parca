@@ -11,17 +11,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import {QueryServiceClient} from '@parca/client';
-import {ProfileSelection, ProfileViewWithData, NavigateFunction} from '..';
+import {useState} from 'react';
 
+import {QueryServiceClient} from '@parca/client';
+import type {NavigateFunction} from '@parca/utilities';
+
+import {ProfileSelection, ProfileViewWithData} from '..';
 import ProfileSelector, {QuerySelection} from '../ProfileSelector';
+
 interface ProfileExplorerSingleProps {
   queryClient: QueryServiceClient;
   query: QuerySelection;
   selectQuery: (query: QuerySelection) => void;
   selectProfile: (source: ProfileSelection) => void;
   profile: ProfileSelection | null;
-  compareProfile: () => void;
   navigateTo: NavigateFunction;
 }
 
@@ -31,39 +34,34 @@ const ProfileExplorerSingle = ({
   selectQuery,
   selectProfile,
   profile,
-  compareProfile,
   navigateTo,
 }: ProfileExplorerSingleProps): JSX.Element => {
+  const [showMetricsGraph, setShowMetricsGraph] = useState(true);
+
   return (
     <>
-      <div className="grid grid-cols-1">
-        <div>
-          <ProfileSelector
-            queryClient={queryClient}
-            querySelection={query}
-            selectQuery={selectQuery}
-            selectProfile={selectProfile}
-            closeProfile={() => {}}
-            profileSelection={profile}
-            comparing={false}
-            onCompareProfile={compareProfile}
-            enforcedProfileName={''} // TODO
-          />
-        </div>
+      <div className="relative">
+        <ProfileSelector
+          queryClient={queryClient}
+          querySelection={query}
+          selectQuery={selectQuery}
+          selectProfile={selectProfile}
+          closeProfile={() => {}} // eslint-disable-line @typescript-eslint/no-empty-function
+          profileSelection={profile}
+          comparing={false}
+          enforcedProfileName={''} // TODO
+          navigateTo={navigateTo}
+          suffix="_a"
+          showMetricsGraph={showMetricsGraph}
+          setDisplayHideMetricsGraphButton={setShowMetricsGraph}
+        />
       </div>
-      <div className="grid grid-cols-1">
-        <div>
-          {profile != null ? (
-            <ProfileViewWithData
-              queryClient={queryClient}
-              profileSource={profile.ProfileSource()}
-              navigateTo={navigateTo}
-            />
-          ) : (
-            <></>
-          )}
-        </div>
-      </div>
+
+      {profile != null ? (
+        <ProfileViewWithData queryClient={queryClient} profileSource={profile.ProfileSource()} />
+      ) : (
+        <></>
+      )}
     </>
   );
 };

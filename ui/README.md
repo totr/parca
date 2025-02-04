@@ -7,7 +7,7 @@ This is a [Create React App](https://create-react-app.dev/) project that utilize
 The React app requires an environment variable for the API endpoint so as to talk to the Parca backend. Create a file named `.env.local` in `packages/app/web/` to add the environment variable for the API endpoint.
 
 ```shell
-REACT_APP_PUBLIC_API_ENDPOINT=http://localhost:7070
+VITE_API_ENDPOINT=http://localhost:7070
 ```
 
 Then, start the Parca backend by running the command below. The `--cors-allowed-origins='*'` flag allows for enabling CORS headers on Parca.
@@ -21,13 +21,13 @@ Now the Parca backend will be running and available at `localhost:7070`.
 Because we fetch the transpiled Typescript code from the shared `@parca` packages in the `shared/*` folder, we need to run one more command before we run the development for the React app. This command runs `tsc` in watch mode and also compiles Tailwind CSS for the affected packages.
 
 ```shell
-yarn run watch
+pnpm run watch-parca-dev
 ```
 
 Finally, run the development server for the React app:
 
 ```shell
-yarn workspace @parca/web dev
+pnpm --filter @parca/web dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
@@ -41,7 +41,7 @@ To build the UI, you can use `Makefile` at the root of the project to run the fo
 Run the following command to generate a production build of the React app:
 
 ```shell
-make ui/build # yarn install && yarn build
+make ui/build # pnpm install && pnpm build
 ```
 
 We embed the artifacts (the production build and its static assets) into the final binary distribution.
@@ -75,7 +75,7 @@ We have a feature flag system that allows you to enable or disable features for 
 ### Usage
 
 ```js
-import useUIFeatureFlag from '@parca/functions/useUIFeatureFlag';
+import useUIFeatureFlag from '@parca/hooks';
 
 const Header = () => {
   const isGreetingEnabled = useUIFeatureFlag('greeting');
@@ -105,4 +105,10 @@ http://localhost:3000/?disable-ui-flag=greeting
 When the app loads with the above URL, the feature flags module will handle those and update the flag state accordingly.
 Note: These 'enable' and 'disable' params work for setting one flag value at a time (rather than for example enabling "greeting" and another feature at the same time).
 
-If you are interested in the implementation details, you can read the [source here](packages/shared/functions/src/useUIFeatureFlag/index.ts).
+If you are interested in the implementation details, you can read the [source here](packages/shared/hooks/src/useUIFeatureFlag/index.ts).
+
+### Thanks
+
+<a href="https://www.chromatic.com/"><img src="https://user-images.githubusercontent.com/321738/84662277-e3db4f80-af1b-11ea-88f5-91d67a5e59f6.png" width="153" height="30" alt="Chromatic" /></a>
+
+Thanks to [Chromatic](https://www.chromatic.com/) for providing the visual testing platform that helps us review UI changes and catch visual regressions.

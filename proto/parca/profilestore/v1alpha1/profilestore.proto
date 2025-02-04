@@ -6,6 +6,8 @@ import "google/api/annotations.proto";
 import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";
 
+option go_package = "github.com/parca-dev/parca/gen/go/profilestore";
+
 // ProfileStoreService is the service the accepts pprof writes
 service ProfileStoreService {
   // WriteRaw accepts a raw set of bytes of a pprof file
@@ -15,6 +17,36 @@ service ProfileStoreService {
       body: "*"
     };
   }
+
+  // Write accepts profiling data encoded as an arrow record. It's a
+  // bi-directional streaming RPC, because the first message can contain only
+  // samples without the stacktraces, and only reference stacktrace IDs. The
+  // backend can then request the full stacktrace from the client should it not
+  // know the stacktrace yet.
+  rpc Write(stream WriteRequest) returns (stream WriteResponse) {
+    option (google.api.http) = {
+      post: "/profiles/write"
+      body: "*"
+    };
+  }
+}
+
+// WriteRequest may contain an apache arrow record that only contains profiling
+// samples with a reference to a stacktrace ID, or a full stacktrace. If it
+// only contains samples, the server may request the full stacktrace from the
+// client should it not already know them.
+message WriteRequest {
+  // The bytes containing the arrow record.
+  bytes record = 1;
+}
+
+// WriteResponse may be empty if the server doesn't need any further
+// information, or contain an arrow record that contains the stacktrace IDs
+// that are unknown and therefore requested by the client from the server.
+message WriteResponse {
+  // When record is non-empty it contains the bytes of an arrow record that
+  // contains a column containing the stacktraces that are unknown.
+  bytes record = 1;
 }
 
 // WriteRawRequest writes a pprof profile for a given tenant
@@ -60,6 +92,27 @@ message LabelSet {
 message RawSample {
   // raw_profile is the set of bytes of the pprof profile
   bytes raw_profile = 1;
+  // information about the executable and executable section for normalizaton
+  // purposes.
+  repeated ExecutableInfo executable_info = 2;
+}
+
+// ExecutableInfo is the information about the executable and executable
+// section for normalizaton purposes before symbolization.
+message ExecutableInfo {
+  // elf_type is the type of the elf executable. Technically the elf type is a
+  // 16 bit integer, but protobuf's smallest unsigned integer is 32 bits.
+  uint32 elf_type = 1;
+  // load_segment is the load segment of the executable.
+  LoadSegment load_segment = 2;
+}
+
+// LoadSegment is the load segment of the executable
+message LoadSegment {
+  // The offset from the beginning of the file at which the first byte of the segment resides.
+  uint64 offset = 1;
+  // The virtual address at which the first byte of the segment resides in memory.
+  uint64 vaddr = 2;
 }
 
 // AgentsService maintains the agents

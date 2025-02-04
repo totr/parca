@@ -1,4 +1,4 @@
-// Copyright 2022 The Parca Authors
+// Copyright 2022-2025 The Parca Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -14,53 +14,66 @@
 package symbolizer
 
 import (
+	"bufio"
 	"context"
 	"debug/elf"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
-	"time"
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
 
-	pb "github.com/parca-dev/parca/gen/proto/go/parca/metastore/v1alpha1"
+	debuginfopb "github.com/parca-dev/parca/gen/proto/go/parca/debuginfo/v1alpha1"
+	profilepb "github.com/parca-dev/parca/gen/proto/go/parca/metastore/v1alpha1"
+	"github.com/parca-dev/parca/pkg/debuginfo"
 	"github.com/parca-dev/parca/pkg/profile"
-	"github.com/parca-dev/parca/pkg/runutil"
-	"github.com/parca-dev/parca/pkg/symbol"
+	"github.com/parca-dev/parca/pkg/symbol/addr2line"
+	"github.com/parca-dev/parca/pkg/symbol/demangle"
+	"github.com/parca-dev/parca/pkg/symbol/elfutils"
+)
+
+var (
+	ErrNotValidElf = errors.New("not a valid ELF file")
+	ErrNoDebuginfo = errors.New("no debug info found")
+	ErrLinerFailed = errors.New("liner creation failed")
 )
 
 type DebuginfoMetadata interface {
-	MarkAsNotValidELF(ctx context.Context, buildID string) error
+	SetQuality(ctx context.Context, buildID string, typ debuginfopb.DebuginfoType, quality *debuginfopb.DebuginfoQuality) error
+	Fetch(ctx context.Context, buildID string, typ debuginfopb.DebuginfoType) (*debuginfopb.Debuginfo, error)
+}
+
+// liner is the interface implemented by symbolizers
+// which read an object file (symbol table or debug information) and return
+// source code lines by a given memory address.
+type liner interface {
+	PCToLines(ctx context.Context, pc uint64) ([]profile.LocationLine, error)
+	Close() error
+}
+
+type Option func(*Symbolizer)
+
+func WithDemangleMode(mode string) Option {
+	return func(s *Symbolizer) {
+		s.demangler = demangle.NewDemangler(mode, false)
+	}
 }
 
 type Symbolizer struct {
 	logger log.Logger
-	// attempts counts the total number of symbolication attempts.
-	// It counts per batch.
-	attempts prometheus.Counter
-	// errors counts the total number of symbolication errors, partitioned by an error reason
-	// such as failure to fetch unsymbolized locations.
-	// It counts per batch.
-	errors *prometheus.CounterVec
-	// duration is a histogram to measure how long it takes to finish a symbolication round.
-	// Note, a single observation is per batch.
-	duration prometheus.Histogram
-	// storeDuration is a histogram to measure how long it takes to store the symbolized locations.
-	// Note, a single observation is per batch.
-	storeDuration prometheus.Histogram
 
-	metastore  pb.MetastoreServiceClient
-	symbolizer *symbol.Symbolizer
-	debuginfo  DebuginfoFetcher
-	metadata   DebuginfoMetadata
+	debuginfo             DebuginfoFetcher
+	cache                 SymbolizerCache
+	metadata              DebuginfoMetadata
+	externalAddr2linePath string
 
-	batchSize uint32
+	demangler *demangle.Demangler
 
 	tmpDir string
 }
@@ -68,306 +81,444 @@ type Symbolizer struct {
 type DebuginfoFetcher interface {
 	// Fetch ensures that the debug info for the given build ID is available on
 	// a local filesystem and returns a path to it.
-	FetchDebuginfo(ctx context.Context, buildID string) (io.ReadCloser, error)
+	FetchDebuginfo(ctx context.Context, dbginfo *debuginfopb.Debuginfo) (io.ReadCloser, error)
+}
+
+type SymbolizerCache interface {
+	Get(ctx context.Context, buildID string, addr uint64) ([]profile.LocationLine, bool, error)
+	Set(ctx context.Context, buildID string, addr uint64, lines []profile.LocationLine) error
 }
 
 func New(
 	logger log.Logger,
-	reg prometheus.Registerer,
 	metadata DebuginfoMetadata,
-	metastore pb.MetastoreServiceClient,
+	cache SymbolizerCache,
 	debuginfo DebuginfoFetcher,
-	symbolizer *symbol.Symbolizer,
 	tmpDir string,
-	batchSize uint32,
+	externalAddr2linePath string,
+	opts ...Option,
 ) *Symbolizer {
-	attemptsTotal := promauto.With(reg).NewCounter(
-		prometheus.CounterOpts{
-			Name: "symbolizer_symbolication_attempts_total",
-			Help: "Total number of symbolication attempts in batches.",
-		},
-	)
-	errorsTotal := promauto.With(reg).NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "symbolizer_symbolication_errors_total",
-			Help: "Total number of symbolication errors in batches, partitioned by an error reason.",
-		},
-		[]string{"reason"},
-	)
-	duration := promauto.With(reg).NewHistogram(
-		prometheus.HistogramOpts{
-			Name:    "symbolizer_symbolication_duration_seconds",
-			Help:    "How long it took in seconds to finish a round of the symbolication cycle in batches.",
-			Buckets: []float64{0.001, 0.01, 0.1, 0.3, 0.6, 1, 3, 6, 9, 20, 30, 60, 90, 120},
-		},
-	)
-	storeDuration := promauto.With(reg).NewHistogram(
-		prometheus.HistogramOpts{
-			Name:    "symbolizer_store_duration_seconds",
-			Help:    "How long it took in seconds to store a batch of the symbolized locations.",
-			Buckets: []float64{0.001, 0.01, 0.1, 0.3, 0.6, 1, 3, 6, 9, 20, 30, 60, 90, 120},
-		},
+	const (
+		defaultDemangleMode = "simple"
 	)
 
-	s := Symbolizer{
-		logger:        log.With(logger, "component", "symbolizer"),
-		attempts:      attemptsTotal,
-		errors:        errorsTotal,
-		duration:      duration,
-		storeDuration: storeDuration,
-		metastore:     metastore,
-		symbolizer:    symbolizer,
-		debuginfo:     debuginfo,
-		tmpDir:        tmpDir,
-		batchSize:     batchSize,
-		metadata:      metadata,
+	s := &Symbolizer{
+		logger:                log.With(logger, "component", "symbolizer"),
+		cache:                 cache,
+		debuginfo:             debuginfo,
+		externalAddr2linePath: externalAddr2linePath,
+		tmpDir:                tmpDir,
+		metadata:              metadata,
+		demangler:             demangle.NewDemangler(defaultDemangleMode, false),
 	}
-	return &s
+
+	for _, opt := range opts {
+		opt(s)
+	}
+
+	return s
 }
 
-func (s *Symbolizer) Run(ctx context.Context, interval time.Duration) error {
-	return runutil.Repeat(interval, ctx.Done(), func() error {
-		level.Debug(s.logger).Log("msg", "start symbolization cycle")
-		s.runSymbolizationCycle(ctx)
-		level.Debug(s.logger).Log("msg", "symbolization loop completed")
-		return nil
-	})
+type SymbolizationRequestMappingAddrs struct {
+	// This slice is used to store the symbolization result directly.
+	Locations []*profile.Location
 }
 
-func (s *Symbolizer) runSymbolizationCycle(ctx context.Context) {
-	var begin time.Time
-	prevMaxKey := ""
-	for {
-		begin = time.Now()
-		s.attempts.Inc()
-
-		lres, err := s.metastore.UnsymbolizedLocations(ctx, &pb.UnsymbolizedLocationsRequest{
-			Limit:  s.batchSize,
-			MinKey: prevMaxKey,
-		})
-		if err != nil {
-			level.Error(s.logger).Log("msg", "failed to fetch unsymbolized locations", "err", err)
-			s.errors.WithLabelValues("fetch_unsymbolized_locations").Inc()
-			s.duration.Observe(time.Since(begin).Seconds())
-			// Try again on the next cycle.
-			return
-		}
-		if len(lres.Locations) == 0 {
-			level.Debug(s.logger).Log("msg", "no locations to symbolize")
-			s.duration.Observe(time.Since(begin).Seconds())
-			// Nothing to symbolize.
-			return
-		}
-		prevMaxKey = lres.MaxKey
-
-		level.Debug(s.logger).Log("msg", "attempting to symbolize locations", "count", len(lres.Locations))
-		err = s.Symbolize(ctx, lres.Locations)
-		if err != nil {
-			level.Warn(s.logger).Log("msg", "symbolization attempt finished with errors")
-			level.Debug(s.logger).Log("msg", "errors occurred during symbolization", "err", err)
-		}
-		s.duration.Observe(time.Since(begin).Seconds())
-
-		if s.batchSize == 0 {
-			// If batch size is 0 we won't continue with the next batch as we
-			// should have already processed everything.
-			return
-		}
-	}
+type SymbolizationRequest struct {
+	BuildID  string
+	Mappings []SymbolizationRequestMappingAddrs
 }
 
-// UnsymbolizableMapping returns true if a mapping points to a binary for which
-// locations can't be symbolized in principle, at least now. Examples are
-// "[vdso]", [vsyscall]" and some others, see the code.
-func UnsymbolizableMapping(m *pb.Mapping) bool {
-	name := filepath.Base(m.File)
-	return strings.HasPrefix(name, "[") || strings.HasPrefix(name, "linux-vdso") || strings.HasPrefix(m.File, "/dev/dri/")
-}
-
-type MappingLocations struct {
-	Mapping   *pb.Mapping
-	Locations []*pb.Location
-
-	// LocationsLines is a list of lines per location.
-	LocationsLines [][]profile.LocationLine
-}
-
-func (s *Symbolizer) Symbolize(ctx context.Context, locations []*pb.Location) error {
-	mappingsIndex := map[string]int{}
-	mappingIDs := []string{}
-	for _, loc := range locations {
-		if _, ok := mappingsIndex[loc.MappingId]; !ok {
-			mappingIDs = append(mappingIDs, loc.MappingId)
-			mappingsIndex[loc.MappingId] = len(mappingIDs) - 1
-		}
-	}
-
-	mres, err := s.metastore.Mappings(ctx, &pb.MappingsRequest{MappingIds: mappingIDs})
-	if err != nil {
-		s.errors.WithLabelValues("get_mappings").Inc()
-		return fmt.Errorf("get mappings: %w", err)
-	}
-
-	// Aggregate locations per mapping to get prepared for batch request.
-	locationsByMappings := make([]*MappingLocations, len(mres.Mappings))
-	for i, m := range mres.Mappings {
-		locationsByMappings[i] = &MappingLocations{Mapping: m}
-	}
-
-	for _, loc := range locations {
-		locationsByMapping := locationsByMappings[mappingsIndex[loc.MappingId]]
-		// Already symbolized!
-		if loc.Lines != nil && len(loc.Lines) > 0 {
-			level.Debug(s.logger).Log("msg", "location already symbolized, skipping")
-			continue
-		}
-		locationsByMapping.Locations = append(locationsByMapping.Locations, loc)
-	}
-
-	for _, locationsByMapping := range locationsByMappings {
-		mapping := locationsByMapping.Mapping
-
-		// If Mapping or Mapping.BuildID is empty, we cannot associate an object file with functions.
-		if mapping == nil || len(mapping.BuildId) == 0 || UnsymbolizableMapping(mapping) {
-			level.Debug(s.logger).Log("msg", "mapping of location is empty, skipping")
-			continue
-		}
-		logger := log.With(s.logger, "buildid", mapping.BuildId)
-
-		locations := locationsByMapping.Locations
-		level.Debug(logger).Log("msg", "storage symbolization request started", "build_id_length", len(mapping.BuildId))
-		// Symbolize returns a list of lines per location passed to it.
-		locationsByMapping.LocationsLines, err = s.symbolizeLocationsForMapping(ctx, mapping, locations)
-		if err != nil {
-			level.Debug(logger).Log("msg", "storage symbolization request failed", "err", err)
-			continue
-		}
-		level.Debug(logger).Log("msg", "storage symbolization request done")
-	}
-
-	numFunctions := 0
-	for _, locationsByMapping := range locationsByMappings {
-		for _, locationLines := range locationsByMapping.LocationsLines {
-			numFunctions += len(locationLines)
-		}
-	}
-	if numFunctions == 0 {
-		level.Debug(s.logger).Log("msg", "nothing to store after symbolization")
-		return nil
-	}
-	level.Debug(s.logger).Log("msg", "storing found symbols")
-
-	functions := make([]*pb.Function, numFunctions)
-	numLocations := 0
-	i := 0
-	for _, locationsByMapping := range locationsByMappings {
-		for _, locationLines := range locationsByMapping.LocationsLines {
-			if len(locationLines) == 0 {
-				continue
-			}
-			numLocations++
-			for _, line := range locationLines {
-				functions[i] = line.Function
-				i++
-			}
-		}
-	}
-
-	fres, err := s.metastore.GetOrCreateFunctions(ctx, &pb.GetOrCreateFunctionsRequest{Functions: functions})
-	if err != nil {
-		s.errors.WithLabelValues("get_or_create_functions").Inc()
-		return fmt.Errorf("get or create functions: %w", err)
-	}
-
-	locations = make([]*pb.Location, 0, numLocations)
-	i = 0
-	for _, locationsByMapping := range locationsByMappings {
-		for j, locationLines := range locationsByMapping.LocationsLines {
-			if len(locationLines) == 0 {
-				continue
-			}
-			lines := make([]*pb.Line, 0, len(locationLines))
-			for _, line := range locationLines {
-				lines = append(lines, &pb.Line{
-					FunctionId: fres.Functions[i].Id,
-					Line:       line.Line,
-				})
-				i++
-			}
-			// Update the location with the lines in-place so that in the next
-			// step we can just reuse the same locations as were originally
-			// passed in.
-			locations = append(locations, locationsByMapping.Locations[j])
-			locationsByMapping.Locations[j].Lines = lines
-		}
-	}
-
-	// At this point the locations are symbolized in-place and we can send them to the metastore.
-	defer func(begin time.Time) {
-		s.storeDuration.Observe(time.Since(begin).Seconds())
-	}(time.Now())
-	_, err = s.metastore.CreateLocationLines(ctx, &pb.CreateLocationLinesRequest{
-		Locations: locations,
-	})
-	if err != nil {
-		s.errors.WithLabelValues("create_location_lines").Inc()
-		return fmt.Errorf("create location lines: %w", err)
+func (s *Symbolizer) Symbolize(
+	ctx context.Context,
+	req SymbolizationRequest,
+) error {
+	if err := s.symbolize(ctx, req); err != nil {
+		level.Debug(s.logger).Log("msg", fmt.Sprintf("failed to symbolize: BuildID %s", req.BuildID), "err", err)
 	}
 
 	return nil
 }
 
-// symbolizeLocationsForMapping fetches the debug info for a given build ID and symbolizes it the
-// given location.
-func (s *Symbolizer) symbolizeLocationsForMapping(ctx context.Context, m *pb.Mapping, locations []*pb.Location) ([][]profile.LocationLine, error) {
-	logger := log.With(s.logger, "buildid", m.BuildId)
+func (s *Symbolizer) symbolize(
+	ctx context.Context,
+	req SymbolizationRequest,
+) error {
+	level.Debug(s.logger).Log("msg", "symbolizing", "build_id", req.BuildID)
 
-	// Fetch the debug info for the build ID.
-	rc, err := s.debuginfo.FetchDebuginfo(ctx, m.BuildId)
+	path, f, quality, err := s.getDebuginfo(ctx, req.BuildID)
 	if err != nil {
-		return nil, fmt.Errorf("fetch debuginfo (BuildID: %q): %w", m.BuildId, err)
+		return fmt.Errorf("get debuginfo: %w", err)
 	}
-
-	f, err := os.CreateTemp(s.tmpDir, "parca-symbolizer-*")
-	if err != nil {
-		return nil, fmt.Errorf("create temp file: %w", err)
-	}
-
-	_, err = io.Copy(f, rc)
-	if err != nil {
-		return nil, fmt.Errorf("copy debuginfo to temp file: %w", err)
-	}
-
-	if err := rc.Close(); err != nil {
-		return nil, fmt.Errorf("close debuginfo reader: %w", err)
-	}
-
-	if err := f.Close(); err != nil {
-		return nil, fmt.Errorf("close temp file: %w", err)
-	}
-
-	e, err := elf.Open(f.Name())
-	if err != nil {
-		if err := s.metadata.MarkAsNotValidELF(ctx, m.BuildId); err != nil {
-			level.Error(logger).Log("msg", "failed to mark build ID as not ELF", "err", err)
+	defer func() {
+		if err := f.Close(); err != nil {
+			level.Debug(s.logger).Log("msg", "failed to close debuginfo file", "err", err)
 		}
-		return nil, fmt.Errorf("open temp file as ELF: %w", err)
-	}
+	}()
 
-	if err := e.Close(); err != nil {
-		return nil, fmt.Errorf("close debuginfo file: %w", err)
-	}
+	l := s.newLiner(path, f, quality, req.BuildID)
+	defer l.Close()
 
-	// At this point we have the best version of the debug information file that we could find.
-	// Let's symbolize it.
-	lines, err := s.symbolizer.Symbolize(ctx, m, locations, f.Name())
+	ei, err := profile.ExecutableInfoFromELF(f)
 	if err != nil {
-		if errors.Is(err, symbol.ErrLinerCreationFailedBefore) {
-			level.Debug(logger).Log("msg", "failed to symbolize before", "err", err)
-			return nil, nil
+		return fmt.Errorf("executable info from ELF: %w", err)
+	}
+
+	for _, mapping := range req.Mappings {
+		for _, loc := range mapping.Locations {
+			addr, err := NormalizeAddress(loc.Address, ei, profile.Mapping{
+				StartAddr: loc.Mapping.Start,
+				EndAddr:   loc.Mapping.Limit,
+				Offset:    loc.Mapping.Offset,
+			})
+			if err != nil {
+				return fmt.Errorf("normalize address: %w", err)
+			}
+
+			loc.Lines, err = l.PCToLines(ctx, addr)
+			if err != nil {
+				level.Debug(s.logger).Log("msg", "failed to get lines", "err", err)
+			}
+		}
+	}
+
+	return nil
+}
+
+func (s *Symbolizer) getDebuginfo(ctx context.Context, buildID string) (string, *elf.File, *debuginfopb.DebuginfoQuality, error) {
+	dbginfo, err := s.metadata.Fetch(ctx, buildID, debuginfopb.DebuginfoType_DEBUGINFO_TYPE_DEBUGINFO_UNSPECIFIED)
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("fetching metadata: %w", err)
+	}
+
+	if dbginfo.Quality != nil {
+		if dbginfo.Quality.NotValidElf {
+			return "", nil, nil, ErrNotValidElf
+		}
+		if !dbginfo.Quality.HasDwarf && !dbginfo.Quality.HasGoPclntab && !(dbginfo.Quality.HasSymtab || dbginfo.Quality.HasDynsym) {
+			return "", nil, nil, fmt.Errorf("check previously reported debuginfo quality: %w", ErrNoDebuginfo)
+		}
+	}
+
+	switch dbginfo.Source {
+	case debuginfopb.Debuginfo_SOURCE_UPLOAD:
+		if dbginfo.Upload.State != debuginfopb.DebuginfoUpload_STATE_UPLOADED {
+			return "", nil, nil, debuginfo.ErrNotUploadedYet
+		}
+	case debuginfopb.Debuginfo_SOURCE_DEBUGINFOD:
+		// Nothing to do here, just covering all cases.
+	default:
+		return "", nil, nil, debuginfo.ErrUnknownDebuginfoSource
+	}
+
+	targetPath := filepath.Join(s.tmpDir, buildID)
+	if _, err := os.Stat(targetPath); errors.Is(err, os.ErrNotExist) {
+		// Fetch the debug info for the build ID.
+		rc, err := s.debuginfo.FetchDebuginfo(ctx, dbginfo)
+		if err != nil {
+			return "", nil, nil, fmt.Errorf("fetch debuginfo (BuildID: %q): %w", buildID, err)
+		}
+		defer rc.Close()
+
+		f, err := os.CreateTemp(s.tmpDir, "parca-symbolizer-*")
+		if err != nil {
+			return "", nil, nil, fmt.Errorf("create temp file: %w", err)
 		}
 
-		return nil, fmt.Errorf("failed to symbolize locations for mapping: %w", err)
+		level.Debug(s.logger).Log("msg", fmt.Sprintf("Copying %s to tmp file %s\n", buildID, f.Name()))
+		defer func() {
+			f.Close()
+			os.Remove(f.Name())
+		}()
+
+		if _, err := io.Copy(f, rc); err != nil {
+			return "", nil, nil, fmt.Errorf("copy debuginfo to temp file: %w", err)
+		}
+
+		if err := f.Close(); err != nil {
+			return "", nil, nil, fmt.Errorf("close temp file: %w", err)
+		}
+
+		if err := os.Rename(f.Name(), targetPath); err != nil {
+			return "", nil, nil, fmt.Errorf("rename temp file: %w", err)
+		}
 	}
+
+	e, err := elf.Open(targetPath)
+	if err != nil {
+		if merr := s.metadata.SetQuality(ctx, buildID, debuginfopb.DebuginfoType_DEBUGINFO_TYPE_DEBUGINFO_UNSPECIFIED, &debuginfopb.DebuginfoQuality{
+			NotValidElf: true,
+		}); merr != nil {
+			level.Debug(s.logger).Log("msg", "failed to set metadata quality", "err", merr)
+		}
+
+		return "", nil, nil, fmt.Errorf("open temp file as ELF: %w", err)
+	}
+
+	if dbginfo.Quality == nil {
+		dbginfo.Quality = &debuginfopb.DebuginfoQuality{
+			HasDwarf:     elfutils.HasDWARF(e),
+			HasGoPclntab: elfutils.HasGoPclntab(e),
+			HasSymtab:    elfutils.HasSymtab(e),
+			HasDynsym:    elfutils.HasDynsym(e),
+		}
+		if err := s.metadata.SetQuality(ctx, buildID, debuginfopb.DebuginfoType_DEBUGINFO_TYPE_DEBUGINFO_UNSPECIFIED, dbginfo.Quality); err != nil {
+			if err := e.Close(); err != nil {
+				level.Debug(s.logger).Log("msg", "failed to close debuginfo file", "err", err)
+			}
+			return "", nil, nil, fmt.Errorf("set quality: %w", err)
+		}
+		if !dbginfo.Quality.HasDwarf && !dbginfo.Quality.HasGoPclntab && !(dbginfo.Quality.HasSymtab || dbginfo.Quality.HasDynsym) {
+			if err := e.Close(); err != nil {
+				level.Debug(s.logger).Log("msg", "failed to close debuginfo file", "err", err)
+			}
+			return "", nil, nil, fmt.Errorf("check debuginfo quality: %w", ErrNoDebuginfo)
+		}
+	}
+
+	return targetPath, e, dbginfo.Quality, nil
+}
+
+type cachedLiner struct {
+	logger                log.Logger
+	demangler             *demangle.Demangler
+	filepath              string
+	f                     *elf.File
+	quality               *debuginfopb.DebuginfoQuality
+	buildID               string
+	externalAddr2linePath string
+
+	// this is the concrete liner
+	liner liner
+
+	cache SymbolizerCache
+}
+
+type externalExecutableLiner struct {
+	cmd       exec.Cmd
+	inputPipe io.WriteCloser
+	scanner   *bufio.Scanner
+
+	logger    log.Logger
+	demangler *demangle.Demangler
+}
+
+func (c *cachedLiner) newExternalExecutableLiner(
+	filepath string,
+) (liner, error) {
+	// Create cmd with pipes and scanner for reading output line by line
+	addr2lineCmd := exec.Command(c.externalAddr2linePath, "--exe", filepath, "-afiC")
+	addr2lineInput, err := addr2lineCmd.StdinPipe()
+	if err != nil {
+		return nil, fmt.Errorf("error creating input pipe for addr2line: %w", err)
+	}
+	addr2lineOutput, err := addr2lineCmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("error creating output pipe for addr2line: %w", err)
+	}
+
+	// 100 KiB buffer, addr2line output can be very large sometimes
+	buf := make([]byte, 100*1024)
+	scanner := bufio.NewScanner(addr2lineOutput)
+	scanner.Buffer(buf, 100*1024)
+
+	// Start command to load executable info and wait for input
+	err = addr2lineCmd.Start()
+	if err != nil {
+		return nil, fmt.Errorf("error starting addr2line: %w", err)
+	}
+
+	return &externalExecutableLiner{
+		cmd:       *addr2lineCmd,
+		inputPipe: addr2lineInput,
+		scanner:   scanner,
+		logger:    c.logger,
+		demangler: c.demangler,
+	}, nil
+}
+
+func (l *externalExecutableLiner) Close() error {
+	err := l.inputPipe.Close()
+	if err != nil {
+		level.Warn(l.logger).Log("msg", "error closing input pipe of addr2line process", "err", err)
+		return err
+	}
+
+	err = l.cmd.Wait()
+	if err != nil {
+		level.Warn(l.logger).Log("msg", "error waiting for addr2line process to exit", "err", err)
+		return err
+	}
+	level.Debug(l.logger).Log("msg", "addr2line process exited successfully, closed external executable liner")
+
+	return nil
+}
+
+func (l *externalExecutableLiner) PCToLines(ctx context.Context, pc uint64) ([]profile.LocationLine, error) {
+	// Write the address to addr2line stdin twice in order to get addresses as a proper delimiter
+	for i := 0; i < 2; i++ {
+		_, err := io.WriteString(l.inputPipe, fmt.Sprintf("0x%x\n", pc))
+		if err != nil {
+			return nil, fmt.Errorf("error writing to addr2line stdin: %w\n", err)
+		}
+	}
+
+	// Auxiliary function to call Scan() and handle errors
+	scan := func() error {
+		if !l.scanner.Scan() {
+			if err := l.scanner.Err(); err != nil {
+				return fmt.Errorf("error scanning addr2line output: %w", err)
+			}
+			return fmt.Errorf("unexpected EOF while scanning addr2line output")
+		}
+		return nil
+	}
+
+	lines := []profile.LocationLine{}
+	// addr2line output consists of a variable number of pairs of lines per address
+	// The first line of each block of output is the address, if we have to skip additional lines
+	// it means the previous read loop left some output unread
+	err := scan()
+	if err != nil {
+		return nil, err
+	}
+	addressLine := l.scanner.Text()
+	for !strings.HasPrefix(addressLine, "0x") {
+		err := scan()
+		if err != nil {
+			return nil, err
+		}
+		addressLine = l.scanner.Text()
+	}
+
+	keepReading := true
+	err = scan()
+	if err != nil {
+		return nil, err
+	}
+	for keepReading {
+		line1 := l.scanner.Text()
+
+		err := scan()
+		if err != nil {
+			return nil, err
+		}
+		line2 := l.scanner.Text()
+
+		line1 = strings.TrimSuffix(line1, "\n")
+		line2 = strings.TrimSuffix(line2, "\n")
+
+		fileLocation := strings.Split(line2, ":")
+		lineNum, err := strconv.Atoi(fileLocation[1])
+		if err != nil {
+			lineNum = 0
+		}
+
+		lines = append(lines, profile.LocationLine{
+			Line: int64(lineNum),
+			Function: &profilepb.Function{
+				StartLine: int64(lineNum),
+				Filename:  fileLocation[0],
+				Name:      line1,
+			},
+		})
+
+		err = scan()
+		if err != nil {
+			return nil, err
+		}
+		keepReading = !strings.HasPrefix(l.scanner.Text(), "0x")
+	}
+
 	return lines, nil
+}
+
+// newConcreteLiner creates a new liner for the given mapping and object file path.
+func (s *Symbolizer) newLiner(
+	filepath string,
+	f *elf.File,
+	quality *debuginfopb.DebuginfoQuality,
+	buildID string,
+) liner {
+	return &cachedLiner{
+		logger:                s.logger,
+		demangler:             s.demangler,
+		filepath:              filepath,
+		f:                     f,
+		quality:               quality,
+		buildID:               buildID,
+		externalAddr2linePath: s.externalAddr2linePath,
+
+		cache: s.cache,
+	}
+}
+
+func (c *cachedLiner) Close() error {
+	if c.liner != nil {
+		return c.liner.Close()
+	}
+
+	return nil
+}
+
+func (c *cachedLiner) PCToLines(ctx context.Context, pc uint64) ([]profile.LocationLine, error) {
+	lines, ok, err := c.cache.Get(ctx, c.buildID, pc)
+	if err != nil {
+		return nil, fmt.Errorf("get from cache: %w", err)
+	}
+	if ok {
+		return lines, nil
+	}
+
+	if c.liner == nil {
+		// delay liner creation until first use, we may not need it if we find
+		// the result in the cache
+		c.liner, err = c.newConcreteLiner(c.filepath, c.f, c.quality)
+		if err != nil {
+			return nil, fmt.Errorf("new concrete liner: %w", err)
+		}
+	}
+
+	lines, err = c.liner.PCToLines(ctx, pc)
+	if err != nil {
+		return nil, fmt.Errorf("liner pctolines: %w", err)
+	}
+
+	if err := c.cache.Set(ctx, c.buildID, pc, lines); err != nil {
+		return nil, fmt.Errorf("set cache: %w", err)
+	}
+
+	return lines, nil
+}
+
+func (c *cachedLiner) newConcreteLiner(filepath string, f *elf.File, quality *debuginfopb.DebuginfoQuality) (liner, error) {
+	switch {
+	case c.externalAddr2linePath != "":
+		level.Debug(c.logger).Log("msg", fmt.Sprintf("using external addr2line liner with binary: %s", c.externalAddr2linePath))
+		return c.newExternalExecutableLiner(filepath)
+	case quality.HasDwarf:
+		lnr, err := addr2line.DWARF(c.logger, c.filepath, c.f, c.demangler)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create DWARF liner: %w", err)
+		}
+
+		return lnr, nil
+		// TODO CHECK plt
+	case quality.HasGoPclntab:
+		lnr, err := addr2line.Go(c.logger, c.filepath, c.f)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create Go liner: %w", err)
+		}
+
+		return lnr, nil
+	case quality.HasSymtab || quality.HasDynsym:
+		lnr, err := addr2line.Symbols(c.logger, c.filepath, c.f, c.demangler)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create Symtab liner: %w", err)
+		}
+
+		return lnr, nil
+	default:
+		return nil, ErrLinerFailed
+	}
 }

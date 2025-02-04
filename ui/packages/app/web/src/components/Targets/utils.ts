@@ -13,15 +13,18 @@
 
 import {PillVariant} from '@parca/components';
 
-export enum HealthStatus {
-  'Unspecified',
-  'Good',
-  'Bad',
-}
+const HealthStatus = {
+  Unspecified: 'Unspecified',
+  Good: 'Good',
+  Bad: 'Bad',
+} as const;
+
+type HealthStatusType = (typeof HealthStatus)[keyof typeof HealthStatus];
 
 export const getHealthStatus = (numericValue: number) => {
-  const label = HealthStatus[numericValue] as keyof typeof HealthStatus;
-  const colorVariants: Record<keyof typeof HealthStatus, PillVariant> = {
+  const label = Object.values(HealthStatus)[numericValue];
+
+  const colorVariants: Record<HealthStatusType, PillVariant> = {
     Unspecified: 'neutral',
     Good: 'success',
     Bad: 'danger',

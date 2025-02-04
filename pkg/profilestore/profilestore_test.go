@@ -1,4 +1,4 @@
-// Copyright 2022 The Parca Authors
+// Copyright 2022-2025 The Parca Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -18,18 +18,18 @@ import (
 	"os"
 	"testing"
 
+	"github.com/apache/arrow/go/v17/arrow/memory"
 	"github.com/go-kit/log"
 	"github.com/polarsignals/frostdb"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	profilestorepb "github.com/parca-dev/parca/gen/proto/go/parca/profilestore/v1alpha1"
-	"github.com/parca-dev/parca/pkg/metastore"
-	"github.com/parca-dev/parca/pkg/metastoretest"
-	"github.com/parca-dev/parca/pkg/parcacol"
+	"github.com/parca-dev/parca/pkg/ingester"
+	"github.com/parca-dev/parca/pkg/profile"
 )
 
 func Test_LabelName_Error(t *testing.T) {
@@ -38,33 +38,33 @@ func Test_LabelName_Error(t *testing.T) {
 	ctx := context.Background()
 	logger := log.NewNopLogger()
 	reg := prometheus.NewRegistry()
-	tracer := trace.NewNoopTracerProvider().Tracer("")
+	tracer := noop.NewTracerProvider().Tracer("")
 	col, err := frostdb.New()
 	require.NoError(t, err)
 	colDB, err := col.DB(context.Background(), "parca")
 	require.NoError(t, err)
 
-	schema, err := parcacol.Schema()
+	schema, err := profile.Schema()
 	require.NoError(t, err)
 
 	table, err := colDB.Table(
 		"stacktraces",
-		frostdb.NewTableConfig(schema),
+		frostdb.NewTableConfig(profile.SchemaDefinition()),
 	)
 	require.NoError(t, err)
-	m := metastoretest.NewTestMetastore(
-		t,
+
+	ingester := ingester.NewIngester(
 		logger,
-		reg,
-		tracer,
+		table,
 	)
 
 	api := NewProfileColumnStore(
+		reg,
 		logger,
 		tracer,
-		metastore.NewInProcessClient(m),
-		table,
+		ingester,
 		schema,
+		memory.DefaultAllocator,
 	)
 
 	cases := []struct {
@@ -117,33 +117,33 @@ func BenchmarkProfileColumnStoreWriteSeries(b *testing.B) {
 	ctx := context.Background()
 	logger := log.NewNopLogger()
 	reg := prometheus.NewRegistry()
-	tracer := trace.NewNoopTracerProvider().Tracer("")
+	tracer := noop.NewTracerProvider().Tracer("")
 	col, err := frostdb.New()
 	require.NoError(b, err)
 	colDB, err := col.DB(ctx, "parca")
 	require.NoError(b, err)
 
-	schema, err := parcacol.Schema()
+	schema, err := profile.Schema()
 	require.NoError(b, err)
 
 	table, err := colDB.Table(
 		"stacktraces",
-		frostdb.NewTableConfig(schema),
+		frostdb.NewTableConfig(profile.SchemaDefinition()),
 	)
 	require.NoError(b, err)
-	m := metastoretest.NewTestMetastore(
-		b,
+
+	ingester := ingester.NewIngester(
 		logger,
-		reg,
-		tracer,
+		table,
 	)
 
 	api := NewProfileColumnStore(
+		reg,
 		logger,
 		tracer,
-		metastore.NewInProcessClient(m),
-		table,
+		ingester,
 		schema,
+		memory.DefaultAllocator,
 	)
 
 	content, err := os.ReadFile("../query/testdata/alloc_objects.pb.gz")

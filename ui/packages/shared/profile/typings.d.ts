@@ -12,3 +12,5 @@
 // limitations under the License.
 
 declare module '*.svg';
+declare module 'react-map-interaction';
+declare module 'react-syntax-highlighter/dist/cjs/languages/hljs';

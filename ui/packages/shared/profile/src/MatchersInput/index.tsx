@@ -11,15 +11,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import React, {useState, useEffect, useMemo, useRef} from 'react';
-import TextareaAutosize from 'react-textarea-autosize';
+import React, {useMemo, useRef, useState} from 'react';
+
+import {useQuery} from '@tanstack/react-query';
 import cx from 'classnames';
+import TextareaAutosize from 'react-textarea-autosize';
 
+import {LabelsRequest, LabelsResponse, QueryServiceClient, ValuesRequest} from '@parca/client';
 import {useGrpcMetadata} from '@parca/components';
-import {sanitizeLabelValue} from '@parca/functions';
 import {Query} from '@parca/parser';
-import {LabelsResponse, QueryServiceClient} from '@parca/client';
+import {millisToProtoTimestamp, sanitizeLabelValue} from '@parca/utilities';
 
+import {UtilizationLabels} from '../ProfileSelector';
+import {LabelsProvider, useLabels} from '../contexts/MatchersInputLabelsContext';
+import useGrpcQuery from '../useGrpcQuery';
 import SuggestionsList, {Suggestion, Suggestions} from './SuggestionsList';
 
 interface MatchersInputProps {
@@ -27,6 +32,7 @@ interface MatchersInputProps {
   setMatchersString: (arg: string) => void;
   runQuery: () => void;
   currentQuery: Query;
+  profileType: string;
 }
 
 export interface ILabelNamesResult {
@@ -39,65 +45,108 @@ interface UseLabelNames {
   loading: boolean;
 }
 
-export const useLabelNames = (client: QueryServiceClient): UseLabelNames => {
-  const [loading, setLoading] = useState(true);
-  const [result, setResult] = useState<ILabelNamesResult>({});
+export const useLabelNames = (
+  client: QueryServiceClient,
+  profileType: string,
+  start?: number,
+  end?: number,
+  match?: string[]
+): UseLabelNames => {
   const metadata = useGrpcMetadata();
 
-  useEffect(() => {
-    const call = client.labels({match: []}, {meta: metadata});
-    setLoading(true);
+  const {data, isLoading, error} = useGrpcQuery<LabelsResponse>({
+    key: ['labelNames', profileType, match?.join(',')],
+    queryFn: async () => {
+      const request: LabelsRequest = {match: match !== undefined ? match : []};
+      if (start !== undefined && end !== undefined) {
+        request.start = millisToProtoTimestamp(start);
+        request.end = millisToProtoTimestamp(end);
+      }
+      if (profileType !== undefined) {
+        request.profileType = profileType;
+      }
+      const {response} = await client.labels(request, {meta: metadata});
+      return response;
+    },
+    options: {
+      enabled: profileType !== undefined && profileType !== '',
+      staleTime: 1000 * 60 * 5, // 5 minutes
+      keepPreviousData: false,
+    },
+  });
 
-    call.response
-      .then(response => setResult({response}))
-      .catch(error => setResult({error}))
-      .finally(() => setLoading(false));
-  }, [client, metadata]);
+  return {result: {response: data, error: error as Error}, loading: isLoading};
+};
 
-  return {result, loading};
+interface UseLabelValues {
+  result: {
+    response: string[];
+    error?: Error;
+  };
+  loading: boolean;
+}
+
+export const useLabelValues = (
+  client: QueryServiceClient,
+  labelName: string,
+  profileType: string
+): UseLabelValues => {
+  const metadata = useGrpcMetadata();
+
+  const {data, isLoading, error} = useGrpcQuery<string[]>({
+    key: ['labelValues', labelName, profileType],
+    queryFn: async () => {
+      const request: ValuesRequest = {labelName, match: [], profileType};
+      const {response} = await client.values(request, {meta: metadata});
+      return sanitizeLabelValue(response.labelValues);
+    },
+    options: {
+      enabled:
+        profileType !== undefined &&
+        profileType !== '' &&
+        labelName !== undefined &&
+        labelName !== '',
+      staleTime: 1000 * 60 * 5, // 5 minutes
+      keepPreviousData: false,
+    },
+  });
+
+  return {result: {response: data ?? [], error: error as Error}, loading: isLoading};
+};
+
+export const useFetchUtilizationLabelValues = (
+  labelName: string,
+  utilizationLabels?: UtilizationLabels
+): string[] => {
+  const {data} = useQuery({
+    queryKey: ['utilizationLabelValues', labelName],
+    queryFn: async () => {
+      return await utilizationLabels?.utilizationFetchLabelValues?.(labelName);
+    },
+  });
+
+  return data ?? [];
 };
 
 const MatchersInput = ({
-  queryClient,
   setMatchersString,
   runQuery,
   currentQuery,
 }: MatchersInputProps): JSX.Element => {
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const [focusedInput, setFocusedInput] = useState(false);
-  const [labelValuesLoading, setLabelValuesLoading] = useState(false);
   const [lastCompleted, setLastCompleted] = useState<Suggestion>(new Suggestion('', '', ''));
-  const [labelValues, setLabelValues] = useState<string[] | null>(null);
-  const [currentLabelName, setCurrentLabelName] = useState<string | null>(null);
-  const metadata = useGrpcMetadata();
 
-  const {loading: labelNamesLoading, result} = useLabelNames(queryClient);
-  const {response: labelNamesResponse, error: labelNamesError} = result;
-
-  useEffect(() => {
-    if (currentLabelName !== null) {
-      const call = queryClient.values({labelName: currentLabelName, match: []}, {meta: metadata});
-      setLabelValuesLoading(true);
-
-      call.response
-        .then(response => {
-          // replace single `\` in the `labelValues` string with doubles `\\` if available.
-          const newValues = sanitizeLabelValue(response.labelValues);
-
-          setLabelValues(newValues);
-        })
-        .catch(() => setLabelValues(null))
-        .finally(() => setLabelValuesLoading(false));
-    }
-  }, [currentLabelName, queryClient, metadata]);
-
-  const labelNames = useMemo(() => {
-    return (labelNamesError === undefined || labelNamesError == null) &&
-      labelNamesResponse !== undefined &&
-      labelNamesResponse != null
-      ? labelNamesResponse.labelNames.filter(e => e !== '__name__')
-      : [];
-  }, [labelNamesError, labelNamesResponse]);
+  const {
+    labelNames,
+    labelValues,
+    labelNameMappings,
+    isLabelNamesLoading,
+    isLabelValuesLoading,
+    currentLabelName,
+    setCurrentLabelName,
+    shouldHandlePrefixes,
+  } = useLabels();
 
   const value = currentQuery.matchersString();
 
@@ -128,18 +177,36 @@ const MatchersInput = ({
           return label.toLowerCase().slice(0, inputLength) === inputValue;
         });
 
-        matches.forEach(m =>
-          suggestionSections.labelNames.push({
+        matches.forEach(m => {
+          const suggestion = {
             type: s.type,
             typeahead: s.typeahead,
             value: m,
-          })
-        );
+          };
+
+          if (shouldHandlePrefixes) {
+            const mapping = labelNameMappings.find(l => l.displayName === m);
+            if (mapping != null) {
+              (suggestion as any).fullName = mapping.fullName;
+            }
+          }
+
+          suggestionSections.labelNames.push(suggestion);
+        });
       }
 
       if (s.type === 'labelValue') {
-        if (currentLabelName === null || s.labelName !== currentLabelName) {
-          setCurrentLabelName(s.labelName);
+        let labelNameForQuery = s.labelName;
+
+        if (shouldHandlePrefixes) {
+          const mapping = labelNameMappings.find(l => l.displayName === s.labelName);
+          if (mapping != null) {
+            labelNameForQuery = mapping.fullName;
+          }
+        }
+
+        if (currentLabelName === null || labelNameForQuery !== currentLabelName) {
+          setCurrentLabelName(labelNameForQuery);
           return;
         }
 
@@ -157,7 +224,17 @@ const MatchersInput = ({
       }
     });
     return suggestionSections;
-  }, [currentQuery, lastCompleted, labelNames, labelValues, currentLabelName, value]);
+  }, [
+    currentQuery,
+    lastCompleted,
+    labelNames,
+    labelValues,
+    currentLabelName,
+    value,
+    shouldHandlePrefixes,
+    labelNameMappings,
+    setCurrentLabelName,
+  ]);
 
   const resetLastCompleted = (): void => setLastCompleted(new Suggestion('', '', ''));
 
@@ -168,7 +245,19 @@ const MatchersInput = ({
   };
 
   const complete = (suggestion: Suggestion): string => {
-    return value.slice(0, value.length - suggestion.typeahead.length) + suggestion.value;
+    let newValue = value.slice(0, value.length - suggestion.typeahead.length) + suggestion.value;
+
+    // Add a starting quote if we're completing a operator literal
+    if (suggestion.type === 'literal' && suggestion.value !== ',') {
+      newValue += '"';
+    }
+
+    // Add a closing quote if we're completing a label value
+    if (suggestion.type === 'labelValue') {
+      newValue += '"';
+    }
+
+    return newValue;
   };
 
   const applySuggestion = (suggestion: Suggestion): void => {
@@ -192,11 +281,11 @@ const MatchersInput = ({
   const profileSelected = currentQuery.profileName() === '';
 
   return (
-    <div className="font-mono flex-1 w-full min-w-[300px]">
+    <div className="w-full min-w-[300px] flex-1 font-mono relative">
       <TextareaAutosize
         ref={inputRef}
         className={cx(
-          'bg-gray-50 dark:bg-gray-900 focus:ring-indigo-800 flex-1 block w-full px-2 py-2 text-sm outline-none rounded',
+          'block h-[38px] w-full flex-1 rounded-md border bg-white px-2 py-2 text-sm shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-gray-600 dark:bg-gray-900',
           profileSelected && 'cursor-not-allowed'
         )}
         placeholder={
@@ -214,18 +303,26 @@ const MatchersInput = ({
             ? 'Select a profile first to enter a filter...'
             : 'filter profiles... eg. node="test"'
         }
+        id="matchers-input"
       />
       <SuggestionsList
-        isLabelNamesLoading={labelNamesLoading}
+        isLabelNamesLoading={isLabelNamesLoading}
         suggestions={suggestionSections}
         applySuggestion={applySuggestion}
         inputRef={inputRef.current}
         runQuery={runQuery}
         focusedInput={focusedInput}
-        isLabelValuesLoading={labelValuesLoading && lastCompleted.type === 'literal'}
+        isLabelValuesLoading={isLabelValuesLoading && lastCompleted.type === 'literal'}
+        shouldTrimPrefix={shouldHandlePrefixes}
       />
     </div>
   );
 };
 
-export default MatchersInput;
+export default function MatchersInputWithProvider(props: MatchersInputProps): JSX.Element {
+  return (
+    <LabelsProvider queryClient={props.queryClient} profileType={props.profileType}>
+      <MatchersInput {...props} />
+    </LabelsProvider>
+  );
+}

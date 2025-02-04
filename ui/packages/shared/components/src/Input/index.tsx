@@ -11,15 +11,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import {Icon} from '@iconify/react';
-import Button from '../Button';
-import cx from 'classnames';
 import {useRef} from 'react';
+
+import {Icon} from '@iconify/react';
+import cx from 'classnames';
+
+import {Button} from '../Button';
 
 interface SelfProps {
   className?: string;
   onAction?: () => void;
   actionIcon?: JSX.Element;
+  actionButton?: JSX.Element;
+  id?: string;
 }
 
 export type Props = React.InputHTMLAttributes<HTMLInputElement> & SelfProps;
@@ -28,10 +32,13 @@ const Input = ({
   className = '',
   onAction,
   actionIcon = <Icon icon="ep:arrow-right" />,
+  actionButton,
   onBlur,
+  id = '',
   ...props
 }: Props): JSX.Element => {
   const ref = useRef<HTMLInputElement>(null);
+  const hasAction = onAction != null;
   return (
     <div
       className="relative"
@@ -54,25 +61,33 @@ const Input = ({
       <input
         {...props}
         className={cx(
-          'p-2 rounded-md bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-600',
+          'relative rounded-md border border-gray-200 bg-white p-2 dark:border-gray-600 dark:bg-gray-900 focus:outline-none focus:ring-1 focus:z-2',
           {
             [className]: className.length > 0,
-            'pr-10': onAction != null,
+            '!pr-8': hasAction,
           }
         )}
         onKeyDown={e => {
-          if (e.key === 'Enter' && onAction != null) {
+          if (e.key === 'Enter' && hasAction) {
             onAction();
           }
         }}
+        id={id}
       />
-      {onAction != null ? (
-        <Button
-          onClick={onAction}
-          className="!absolute w-fit inset-y-0 right-0 !px-2 aspect-square rounded-tl-none rounded-bl-none"
+      {hasAction ? (
+        <div
+          className={cx(
+            '!absolute inset-y-[1px] right-[1px] rounded-bl-none rounded-tl-none rounded-md w-8 z-4'
+          )}
         >
-          {actionIcon}
-        </Button>
+          {actionButton != null ? (
+            actionButton
+          ) : (
+            <Button variant="secondary" onClick={onAction} className={cx('h-full !px-2')}>
+              {actionIcon}
+            </Button>
+          )}
+        </div>
       ) : null}
     </div>
   );

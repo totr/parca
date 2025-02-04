@@ -11,40 +11,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import React from 'react';
-import type {Props as CallgraphProps} from '@parca/profile/src/Callgraph';
-import ProfileExplorer from './ProfileExplorer';
+import type {Props as CallgraphProps} from './Callgraph';
+import {useLabelNames} from './MatchersInput';
+import ProfileExplorer, {getExpressionAsAString} from './ProfileExplorer';
 import ProfileTypeSelector from './ProfileTypeSelector';
-import type {FlamegraphData, TopTableData} from './ProfileView';
-import {QueryServiceClient} from '@parca/client';
+import CustomSelect from './SimpleMatchers/Select';
 
-export * from './IcicleGraph';
+export * from './ProfileIcicleGraph/IcicleGraph';
 export * from './ProfileIcicleGraph';
 export * from './ProfileSource';
 export * from './ProfileView';
 export * from './ProfileViewWithData';
 export * from './utils';
 export * from './ProfileTypeSelector';
+export * from './SourceView';
+export * from './ProfileMetricsGraph';
+export {default as Callgraph} from './Callgraph';
+
+export const DEFAULT_PROFILE_EXPLORER_PARAM_VALUES = {
+  dashboard_items: 'icicle',
+};
 
 export type {CallgraphProps};
 
-const Callgraph = React.lazy(async () => await import('@parca/profile/src/Callgraph'));
-
-export {Callgraph, ProfileExplorer, ProfileTypeSelector};
-
-// Leaving this in here due to lack of a better place to put it.
-interface GrafanaParcaDataPayload {
-  flamegraphData: FlamegraphData;
-  topTableData: TopTableData;
-  actions: {
-    downloadPprof: () => void;
-    getQueryClient: () => QueryServiceClient;
-  };
-  error?: undefined;
-}
-
-interface GrafanaParcaErrorPayload {
-  error: Error;
-}
-
-export type GrafanaParcaData = GrafanaParcaErrorPayload | GrafanaParcaDataPayload;
+export {ProfileExplorer, ProfileTypeSelector, getExpressionAsAString, CustomSelect, useLabelNames};

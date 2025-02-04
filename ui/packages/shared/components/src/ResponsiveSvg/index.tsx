@@ -11,8 +11,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import {useState, useEffect, Children} from 'react';
-import {useContainerDimensions} from '@parca/dynamicsize';
+import {Children, useEffect, useState} from 'react';
+
+import {useContainerDimensions} from '@parca/hooks';
 
 interface Props {
   children: JSX.Element;
@@ -31,7 +32,7 @@ const addPropsToChildren = (children: JSX.Element, props: {[x: string]: any}): J
   return Children.map(children, addProps);
 };
 
-export const ResponsiveSvg = (props: Props): JSX.Element => {
+const ResponsiveSvg = (props: Props): JSX.Element => {
   const {children} = props;
   const {ref, dimensions} = useContainerDimensions();
   const {width} = dimensions ?? {width: 0};

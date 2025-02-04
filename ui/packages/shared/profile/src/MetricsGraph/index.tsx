@@ -11,48 +11,62 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import React, {useEffect, useRef, useState} from 'react';
+import React, {Fragment, useCallback, useId, useMemo, useRef, useState} from 'react';
+
 import * as d3 from 'd3';
 import {pointer} from 'd3-selection';
-import {formatForTimespan} from '@parca/functions/time';
-import {SingleProfileSelection, timeFormat} from '..';
-import {cutToMaxStringLength} from '@parca/functions/string';
 import throttle from 'lodash.throttle';
-import {MetricsSeries as MetricsSeriesPb, MetricsSample, Label} from '@parca/client';
-import {usePopper} from 'react-popper';
-import type {VirtualElement} from '@popperjs/core';
-import {valueFormatter, formatDate, sanitizeHighlightedValues} from '@parca/functions';
-import {DateTimeRange} from '@parca/components';
-import {useContainerDimensions} from '@parca/dynamicsize';
-import useIsShiftDown from '@parca/components/src/hooks/useIsShiftDown';
+import {useContextMenu} from 'react-contexify';
 
-import MetricsSeries from '../MetricsSeries';
+import {Label, MetricsSample, MetricsSeries as MetricsSeriesPb} from '@parca/client';
+import {DateTimeRange, useParcaContext} from '@parca/components';
+import {
+  formatDate,
+  formatForTimespan,
+  getPrecision,
+  sanitizeHighlightedValues,
+  valueFormatter,
+} from '@parca/utilities';
+
+import {MergedProfileSelection} from '..';
 import MetricsCircle from '../MetricsCircle';
+import MetricsSeries from '../MetricsSeries';
+import MetricsContextMenu from './MetricsContextMenu';
+import MetricsInfoPanel from './MetricsInfoPanel';
+import MetricsTooltip from './MetricsTooltip';
 
-interface RawMetricsGraphProps {
+interface Props {
   data: MetricsSeriesPb[];
   from: number;
   to: number;
-  profile: SingleProfileSelection | null;
-  onSampleClick: (timestamp: number, value: number, labels: Label[]) => void;
-  onLabelClick: (labelName: string, labelValue: string) => void;
+  profile: MergedProfileSelection | null;
+  onSampleClick: (timestamp: number, value: number, labels: Label[], duration: number) => void;
+  addLabelMatcher: (
+    labels: {key: string; value: string} | Array<{key: string; value: string}>
+  ) => void;
   setTimeRange: (range: DateTimeRange) => void;
   sampleUnit: string;
   width?: number;
+  height?: number;
+  margin?: number;
+  sumBy?: string[];
 }
 
-interface HighlightedSeries {
+export interface HighlightedSeries {
   seriesIndex: number;
   labels: Label[];
   timestamp: number;
   value: number;
+  valuePerSecond: number;
+  duration: number;
   x: number;
   y: number;
 }
 
-interface Series {
+export interface Series {
   metric: Label[];
   values: number[][];
+  labelset: string;
 }
 
 const MetricsGraph = ({
@@ -61,24 +75,36 @@ const MetricsGraph = ({
   to,
   profile,
   onSampleClick,
-  onLabelClick,
+  addLabelMatcher,
   setTimeRange,
   sampleUnit,
-}: RawMetricsGraphProps): JSX.Element => {
-  const {ref, dimensions} = useContainerDimensions();
-
+  width = 0,
+  height = 0,
+  margin = 0,
+  sumBy,
+}: Props): JSX.Element => {
+  const [isInfoPanelOpen, setIsInfoPanelOpen] = useState<boolean>(false);
   return (
-    <div ref={ref}>
+    <div className="relative" onClick={() => isInfoPanelOpen && setIsInfoPanelOpen(false)}>
+      <div className="absolute right-0 top-0">
+        <MetricsInfoPanel
+          isInfoPanelOpen={isInfoPanelOpen}
+          onInfoIconClick={() => setIsInfoPanelOpen(true)}
+        />
+      </div>
       <RawMetricsGraph
         data={data}
         from={from}
         to={to}
         profile={profile}
         onSampleClick={onSampleClick}
-        onLabelClick={onLabelClick}
+        addLabelMatcher={addLabelMatcher}
         setTimeRange={setTimeRange}
         sampleUnit={sampleUnit}
-        width={dimensions?.width}
+        width={width}
+        height={height}
+        margin={margin}
+        sumBy={sumBy}
       />
     </div>
   );
@@ -96,184 +122,59 @@ export const parseValue = (value: string): number | null => {
 const lineStroke = '1px';
 const lineStrokeHover = '2px';
 
-interface MetricsTooltipProps {
-  x: number;
-  y: number;
-  highlighted: HighlightedSeries;
-  onLabelClick: (labelName: string, labelValue: string) => void;
-  contextElement: Element | null;
-  sampleUnit: string;
-}
-
-function generateGetBoundingClientRect(contextElement: Element, x = 0, y = 0): () => DOMRect {
-  const domRect = contextElement.getBoundingClientRect();
-  return () =>
-    // eslint-disable-next-line @typescript-eslint/consistent-type-assertions
-    ({
-      width: 0,
-      height: 0,
-      top: domRect.y + y,
-      left: domRect.x + x,
-      right: domRect.x + x,
-      bottom: domRect.y + y,
-    } as DOMRect);
-}
-
-const virtualElement: VirtualElement = {
-  getBoundingClientRect: () => {
-    // eslint-disable-next-line @typescript-eslint/consistent-type-assertions
-    return {
-      width: 0,
-      height: 0,
-      top: 0,
-      left: 0,
-      right: 0,
-      bottom: 0,
-    } as DOMRect;
-  },
-};
-
-export const MetricsTooltip = ({
-  x,
-  y,
-  highlighted,
-  onLabelClick,
-  contextElement,
-  sampleUnit,
-}: MetricsTooltipProps): JSX.Element => {
-  const [popperElement, setPopperElement] = useState<HTMLDivElement | null>(null);
-
-  const {styles, attributes, ...popperProps} = usePopper(virtualElement, popperElement, {
-    placement: 'auto-start',
-    strategy: 'absolute',
-    modifiers: [
-      {
-        name: 'preventOverflow',
-        options: {
-          tether: false,
-          altAxis: true,
-        },
-      },
-      {
-        name: 'offset',
-        options: {
-          offset: [30, 30],
-        },
-      },
-    ],
-  });
-
-  const update = popperProps.update;
-
-  useEffect(() => {
-    if (contextElement != null) {
-      virtualElement.getBoundingClientRect = generateGetBoundingClientRect(contextElement, x, y);
-      void update?.();
-    }
-  }, [x, y, contextElement, update]);
-
-  const nameLabel: Label | undefined = highlighted?.labels.find(e => e.name === '__name__');
-  const highlightedNameLabel: Label = nameLabel !== undefined ? nameLabel : {name: '', value: ''};
-
-  return (
-    <div ref={setPopperElement} style={styles.popper} {...attributes.popper} className="z-10">
-      <div className="flex max-w-md">
-        <div className="m-auto">
-          <div
-            className="border-gray-300 dark:border-gray-500 bg-gray-50 dark:bg-gray-900 rounded-lg p-3 shadow-lg opacity-90"
-            style={{borderWidth: 1}}
-          >
-            <div className="flex flex-row">
-              <div className="ml-2 mr-6">
-                <span className="font-semibold">{highlightedNameLabel.value}</span>
-                <span className="block text-gray-700 dark:text-gray-300 my-2">
-                  <table className="table-auto">
-                    <tbody>
-                      <tr>
-                        <td className="w-1/4">Value</td>
-                        <td className="w-3/4">
-                          {valueFormatter(highlighted.value, sampleUnit, 1)}
-                        </td>
-                      </tr>
-                      <tr>
-                        <td className="w-1/4">At</td>
-                        <td className="w-3/4">{formatDate(highlighted.timestamp, timeFormat)}</td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </span>
-                <span className="block text-gray-500 my-2">
-                  {highlighted.labels
-                    .filter((label: Label) => label.name !== '__name__')
-                    .map(function (label: Label) {
-                      return (
-                        <button
-                          key={label.name}
-                          type="button"
-                          className="inline-block rounded-lg text-gray-700 bg-gray-200 dark:bg-gray-700 dark:text-gray-400 px-2 py-1 text-xs font-bold mr-3"
-                          onClick={() => onLabelClick(label.name, label.value)}
-                        >
-                          {cutToMaxStringLength(`${label.name}="${label.value}"`, 37)}
-                        </button>
-                      );
-                    })}
-                </span>
-                <span className="block text-gray-500 text-xs">
-                  Hold shift and click label to add to query.
-                </span>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-};
-
 export const RawMetricsGraph = ({
   data,
   from,
   to,
   profile,
   onSampleClick,
-  onLabelClick,
+  addLabelMatcher,
   setTimeRange,
   width,
+  height = 50,
+  margin = 0,
   sampleUnit,
-}: RawMetricsGraphProps): JSX.Element => {
+  sumBy,
+}: Props): JSX.Element => {
+  const {timezone} = useParcaContext();
   const graph = useRef(null);
   const [dragging, setDragging] = useState(false);
   const [hovering, setHovering] = useState(false);
   const [relPos, setRelPos] = useState(-1);
   const [pos, setPos] = useState([0, 0]);
+  const [isContextMenuOpen, setIsContextMenuOpen] = useState<boolean>(false);
   const metricPointRef = useRef(null);
-  const isShiftDown = useIsShiftDown();
+  const idForContextMenu = useId();
 
-  const time: number = parseFloat(profile?.HistoryParams().time);
+  // the time of the selected point is the start of the merge window
+  const time: number = parseFloat(profile?.HistoryParams().merge_from);
 
   if (width === undefined || width == null) {
     width = 0;
   }
 
-  const height = Math.min(width / 2.5, 400);
-  const margin = 50;
-  const marginRight = 20;
+  const graphWidth = width - margin * 1.5 - margin / 2;
 
   const series: Series[] = data.reduce<Series[]>(function (agg: Series[], s: MetricsSeriesPb) {
     if (s.labelset !== undefined) {
+      const metric = s.labelset.labels.sort((a, b) => a.name.localeCompare(b.name));
       agg.push({
-        metric: s.labelset.labels,
+        metric,
         values: s.samples.reduce<number[][]>(function (agg: number[][], d: MetricsSample) {
-          if (d.timestamp !== undefined && d.value !== undefined) {
-            const t = (+d.timestamp.seconds * 1e9 + d.timestamp.nanos) / 1e6; // https://github.com/microsoft/TypeScript/issues/5710#issuecomment-157886246
-            agg.push([t, parseFloat(d.value)]);
+          if (d.timestamp !== undefined && d.valuePerSecond !== undefined) {
+            const t = (Number(d.timestamp.seconds) * 1e9 + d.timestamp.nanos) / 1e6; // https://github.com/microsoft/TypeScript/issues/5710#issuecomment-157886246
+            agg.push([t, d.valuePerSecond, Number(d.value), Number(d.duration)]);
           }
           return agg;
         }, []),
+        labelset: metric.map(m => `${m.name}=${m.value}`).join(','),
       });
     }
     return agg;
   }, []);
+
+  // Sort series by id to make sure the colors are consistent
+  series.sort((a, b) => a.labelset.localeCompare(b.labelset));
 
   const extentsY = series.map(function (s) {
     return d3.extent(s.values, function (d) {
@@ -289,16 +190,14 @@ export const RawMetricsGraph = ({
   });
 
   /* Scale */
-  const xScale = d3
-    .scaleUtc()
-    .domain([from, to])
-    .range([0, width - margin - marginRight]);
+  const xScale = d3.scaleUtc().domain([from, to]).range([0, graphWidth]);
 
   const yScale = d3
     .scaleLinear()
     // tslint:disable-next-line
     .domain([minY, maxY] as Iterable<d3.NumberValue>)
-    .range([height - margin, 0]);
+    .range([height - margin, 0])
+    .nice();
 
   const color = d3.scaleOrdinal(d3.schemeCategory10);
 
@@ -307,17 +206,20 @@ export const RawMetricsGraph = ({
     d => yScale(d[1])
   );
 
-  const getClosest = (): HighlightedSeries | null => {
+  const highlighted = useMemo(() => {
+    // Return the closest point as the highlighted point
+
     const closestPointPerSeries = series.map(function (s) {
       const distances = s.values.map(d => {
-        const x = xScale(d[0]);
-        const y = yScale(d[1]);
+        const x = xScale(d[0]) + margin / 2;
+        const y = yScale(d[1]) - margin / 3;
 
         return Math.sqrt(Math.pow(pos[0] - x, 2) + Math.pow(pos[1] - y, 2));
       });
 
       const pointIndex = d3.minIndex(distances);
       const minDistance = distances[pointIndex];
+
       return {
         pointIndex,
         distance: minDistance,
@@ -327,18 +229,17 @@ export const RawMetricsGraph = ({
     const closestSeriesIndex = d3.minIndex(closestPointPerSeries, s => s.distance);
     const pointIndex = closestPointPerSeries[closestSeriesIndex].pointIndex;
     const point = series[closestSeriesIndex].values[pointIndex];
-
     return {
       seriesIndex: closestSeriesIndex,
       labels: series[closestSeriesIndex].metric,
       timestamp: point[0],
-      value: point[1],
+      valuePerSecond: point[1],
+      value: point[2],
+      duration: point[3],
       x: xScale(point[0]),
       y: yScale(point[1]),
     };
-  };
-
-  const highlighted = getClosest();
+  }, [pos, series, xScale, yScale, margin]);
 
   const onMouseDown = (e: React.MouseEvent<SVGSVGElement | HTMLDivElement, MouseEvent>): void => {
     // only left mouse button
@@ -365,7 +266,8 @@ export const RawMetricsGraph = ({
       onSampleClick(
         Math.round(highlighted.timestamp),
         highlighted.value,
-        sanitizeHighlightedValues(highlighted.labels) // When a user clicks on any sample in the graph, replace single `\` in the `labelValues` string with doubles `\\` if available.
+        sanitizeHighlightedValues(highlighted.labels), // When a user clicks on any sample in the graph, replace single `\` in the `labelValues` string with doubles `\\` if available.
+        highlighted.duration
       );
     }
   };
@@ -386,14 +288,22 @@ export const RawMetricsGraph = ({
       return;
     }
 
-    const firstTime = xScale.invert(relPos).valueOf();
-    const secondTime = xScale.invert(pos[0]).valueOf();
+    let startPos = relPos;
+    let endPos = pos[0];
 
-    if (firstTime > secondTime) {
-      setTimeRange(DateTimeRange.fromAbsoluteDates(secondTime, firstTime));
-    } else {
-      setTimeRange(DateTimeRange.fromAbsoluteDates(firstTime, secondTime));
+    if (startPos > endPos) {
+      startPos = pos[0];
+      endPos = relPos;
     }
+
+    const startCorrection = 10;
+    const endCorrection = 30;
+
+    const firstTime = xScale.invert(startPos - startCorrection).valueOf();
+    const secondTime = xScale.invert(endPos - endCorrection).valueOf();
+
+    setTimeRange(DateTimeRange.fromAbsoluteDates(firstTime, secondTime));
+
     setRelPos(-1);
 
     e.stopPropagation();
@@ -403,6 +313,10 @@ export const RawMetricsGraph = ({
   const throttledSetPos = throttle(setPos, 20);
 
   const onMouseMove = (e: React.MouseEvent<SVGSVGElement | HTMLDivElement, MouseEvent>): void => {
+    if (isContextMenuOpen) {
+      return;
+    }
+
     // X/Y coordinate array relative to svg
     const rel = pointer(e);
 
@@ -411,9 +325,7 @@ export const RawMetricsGraph = ({
     const yCoordinate = rel[1];
     const yCoordinateWithoutMargin = yCoordinate - margin;
 
-    if (!isShiftDown) {
-      throttledSetPos([xCoordinateWithoutMargin, yCoordinateWithoutMargin]);
-    }
+    throttledSetPos([xCoordinateWithoutMargin, yCoordinateWithoutMargin]);
   };
 
   const findSelectedProfile = (): HighlightedSeries | null => {
@@ -422,17 +334,31 @@ export const RawMetricsGraph = ({
     }
 
     let s: Series | null = null;
-    let seriesIndex: number = -1;
+    let seriesIndex = -1;
+
+    // if there are both query matchers and also a sumby value, we need to check if the sumby value is part of the query matchers.
+    // if it is, then we should prioritize using the sumby label name and value to find the selected profile.
+    const useSumBy =
+      sumBy !== undefined &&
+      sumBy.length > 0 &&
+      profile.query.matchers.length > 0 &&
+      profile.query.matchers.some(e => sumBy.includes(e.key));
+
+    // get only the sumby keys and values from the profile query matchers
+    const sumByMatchers =
+      sumBy !== undefined ? profile.query.matchers.filter(e => sumBy.includes(e.key)) : [];
+
+    const keysToMatch = useSumBy ? sumByMatchers : profile.query.matchers;
 
     outer: for (let i = 0; i < series.length; i++) {
-      const keys = profile.labels.map(e => e.name);
+      const keys = keysToMatch.map(e => e.key);
       for (let j = 0; j < keys.length; j++) {
-        const labelName = keys[j];
-        const label = series[i].metric.find(e => e.name === labelName);
+        const matcherKey = keys[j];
+        const label = series[i].metric.find(e => e.name === matcherKey);
         if (label === undefined) {
           continue outer; // label doesn't exist to begin with
         }
-        if (profile.labels[j].value !== label.value) {
+        if (keysToMatch[j].value !== label.value) {
           continue outer; // label values don't match
         }
       }
@@ -455,7 +381,9 @@ export const RawMetricsGraph = ({
       labels: [],
       seriesIndex,
       timestamp: sample[0],
-      value: sample[1],
+      valuePerSecond: sample[1],
+      value: sample[2],
+      duration: sample[3],
       x: xScale(sample[0]),
       y: yScale(sample[1]),
     };
@@ -463,22 +391,63 @@ export const RawMetricsGraph = ({
 
   const selected = findSelectedProfile();
 
+  const MENU_ID = `metrics-context-menu-${idForContextMenu}`;
+
+  const {show} = useContextMenu({
+    id: MENU_ID,
+  });
+
+  const displayMenu = useCallback(
+    (e: React.MouseEvent): void => {
+      show({
+        event: e,
+      });
+    },
+    [show]
+  );
+
+  const trackVisibility = (isVisible: boolean): void => {
+    setIsContextMenuOpen(isVisible);
+  };
+
+  const isDeltaType = profile !== null ? profile?.query.profType.delta : false;
+
+  let yAxisLabel = sampleUnit;
+  let yAxisUnit = sampleUnit;
+  if (isDeltaType) {
+    if (sampleUnit === 'nanoseconds') {
+      yAxisLabel = 'CPU Cores';
+      yAxisUnit = '';
+    }
+    if (sampleUnit === 'bytes') {
+      yAxisLabel = 'Bytes per Second';
+    }
+  }
+
   return (
     <>
+      <MetricsContextMenu
+        onAddLabelMatcher={addLabelMatcher}
+        menuId={MENU_ID}
+        highlighted={highlighted}
+        trackVisibility={trackVisibility}
+      />
       {highlighted != null && hovering && !dragging && pos[0] !== 0 && pos[1] !== 0 && (
         <div
           onMouseMove={onMouseMove}
           onMouseEnter={() => setHovering(true)}
           onMouseLeave={() => setHovering(false)}
         >
-          <MetricsTooltip
-            x={pos[0] + margin}
-            y={pos[1] + margin}
-            highlighted={highlighted}
-            onLabelClick={onLabelClick}
-            contextElement={graph.current}
-            sampleUnit={sampleUnit}
-          />
+          {!isContextMenuOpen && (
+            <MetricsTooltip
+              x={pos[0] + margin}
+              y={pos[1] + margin}
+              highlighted={highlighted}
+              contextElement={graph.current}
+              sampleUnit={sampleUnit}
+              delta={isDeltaType}
+            />
+          )}
         </div>
       )}
       <div
@@ -487,6 +456,7 @@ export const RawMetricsGraph = ({
           setHovering(true);
         }}
         onMouseLeave={() => setHovering(false)}
+        onContextMenu={displayMenu}
       >
         <svg
           width={`${width}px`}
@@ -509,7 +479,111 @@ export const RawMetricsGraph = ({
               </g>
             )}
           </g>
-          <g transform={`translate(${margin}, ${margin})`}>
+          <g transform={`translate(${margin * 1.5}, ${margin / 1.5})`}>
+            <g className="y axis" textAnchor="end" fontSize="10" fill="none">
+              {yScale.ticks(5).map((d, i, allTicks) => {
+                let decimals = 2;
+                const intervalBetweenTicks = allTicks[1] - allTicks[0];
+
+                if (intervalBetweenTicks < 1) {
+                  const precision = getPrecision(intervalBetweenTicks);
+                  decimals = precision;
+                }
+
+                return (
+                  <Fragment key={`${i.toString()}-${d.toString()}`}>
+                    <g
+                      key={`tick-${i}`}
+                      className="tick"
+                      /* eslint-disable-next-line @typescript-eslint/restrict-template-expressions */
+                      transform={`translate(0, ${yScale(d)})`}
+                    >
+                      <line className="stroke-gray-300 dark:stroke-gray-500" x2={-6} />
+                      <text fill="currentColor" x={-9} dy={'0.32em'}>
+                        {valueFormatter(d, yAxisUnit, decimals)}
+                      </text>
+                    </g>
+                    <g key={`grid-${i}`}>
+                      <line
+                        className="stroke-gray-300 dark:stroke-gray-500"
+                        x1={xScale(from)}
+                        x2={xScale(to)}
+                        y1={yScale(d)}
+                        y2={yScale(d)}
+                      />
+                    </g>
+                  </Fragment>
+                );
+              })}
+              <line
+                className="stroke-gray-300 dark:stroke-gray-500"
+                x1={0}
+                x2={0}
+                y1={0}
+                y2={height - margin}
+              />
+              <line
+                className="stroke-gray-300 dark:stroke-gray-500"
+                x1={xScale(to)}
+                x2={xScale(to)}
+                y1={0}
+                y2={height - margin}
+              />
+              <g transform={`translate(${-margin}, ${(height - margin) / 2}) rotate(270)`}>
+                <text
+                  fill="currentColor"
+                  dy="-0.7em"
+                  className="text-sm capitalize"
+                  textAnchor="middle"
+                >
+                  {yAxisLabel}
+                </text>
+              </g>
+            </g>
+            <g
+              className="x axis"
+              fill="none"
+              fontSize="10"
+              textAnchor="middle"
+              transform={`translate(0,${height - margin})`}
+            >
+              {xScale.ticks(5).map((d, i) => (
+                <Fragment key={`${i.toString()}-${d.toString()}`}>
+                  <g
+                    key={`tick-${i}`}
+                    className="tick"
+                    /* eslint-disable-next-line @typescript-eslint/restrict-template-expressions */
+                    transform={`translate(${xScale(d)}, 0)`}
+                  >
+                    <line y2={6} className="stroke-gray-300 dark:stroke-gray-500" />
+                    <text fill="currentColor" dy=".71em" y={9}>
+                      {formatDate(d, formatForTimespan(from, to), timezone)}
+                    </text>
+                  </g>
+                  <g key={`grid-${i}`}>
+                    <line
+                      className="stroke-gray-300 dark:stroke-gray-500"
+                      x1={xScale(d)}
+                      x2={xScale(d)}
+                      y1={0}
+                      y2={-height + margin}
+                    />
+                  </g>
+                </Fragment>
+              ))}
+              <line
+                className="stroke-gray-300 dark:stroke-gray-500"
+                x1={0}
+                x2={graphWidth}
+                y1={0}
+                y2={0}
+              />
+              <g transform={`translate(${(width - 2.5 * margin) / 2}, ${margin / 2})`}>
+                <text fill="currentColor" dy=".71em" y={5} className="text-sm">
+                  Time
+                </text>
+              </g>
+            </g>
             <g className="lines fill-transparent">
               {series.map((s, i) => (
                 <g key={i} className="line">
@@ -549,42 +623,6 @@ export const RawMetricsGraph = ({
                 <MetricsCircle cx={selected.x} cy={selected.y} radius={5} />
               </g>
             )}
-            <g
-              className="x axis"
-              fill="none"
-              fontSize="10"
-              textAnchor="middle"
-              transform={`translate(0,${height - margin})`}
-            >
-              {xScale.ticks(5).map((d, i) => (
-                <g
-                  key={i}
-                  className="tick"
-                  /* eslint-disable-next-line @typescript-eslint/restrict-template-expressions */
-                  transform={`translate(${xScale(d)}, 0)`}
-                >
-                  <line y2={6} stroke="currentColor" />
-                  <text fill="currentColor" dy=".71em" y={9}>
-                    {formatDate(d, formatForTimespan(from, to))}
-                  </text>
-                </g>
-              ))}
-            </g>
-            <g className="y axis" textAnchor="end" fontSize="10" fill="none">
-              {yScale.ticks(3).map((d, i) => (
-                <g
-                  key={i}
-                  className="tick"
-                  /* eslint-disable-next-line @typescript-eslint/restrict-template-expressions */
-                  transform={`translate(0, ${yScale(d)})`}
-                >
-                  <line stroke="currentColor" x2={-6} />
-                  <text fill="currentColor" x={-9} dy={'0.32em'}>
-                    {valueFormatter(d, sampleUnit, 1)}
-                  </text>
-                </g>
-              ))}
-            </g>
           </g>
         </svg>
       </div>

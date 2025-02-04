@@ -12,12 +12,13 @@
 // limitations under the License.
 
 import {useRef, useState} from 'react';
-import cx from 'classnames';
+
 import {Popover} from '@headlessui/react';
-import {DateTimeRange, DateUnion} from './utils';
 import {useClickAway} from 'react-use';
-import DateTimeRangePickerTrigger from './DateTimeRangePickerTrigger';
+
 import DateTimeRangePickerPanel from './DateTimeRangePickerPanel';
+import DateTimeRangePickerText from './DateTimeRangePickerText';
+import {DateTimeRange} from './utils';
 
 interface DateTimeRangePickerProps {
   onRangeSelection: (range: DateTimeRange) => void;
@@ -27,31 +28,38 @@ interface DateTimeRangePickerProps {
 const DateTimeRangePicker = ({onRangeSelection, range}: DateTimeRangePickerProps): JSX.Element => {
   const [isActive, setIsActive] = useState<boolean>(false);
   const containerRef = useRef<HTMLDivElement>(null);
+
   useClickAway(containerRef, () => {
     setIsActive(false);
   });
 
+  const toggleActive = (): void => {
+    setIsActive(true);
+  };
+
   return (
     <Popover>
-      <div ref={containerRef} className="items-center w-fit">
-        <DateTimeRangePickerTrigger
+      <div ref={containerRef} className="relative w-fit items-center">
+        <DateTimeRangePickerText
           range={range}
+          onClick={toggleActive}
           isActive={isActive}
-          onClick={() => {
-            setIsActive(!isActive);
+          onRangeSelection={(range: DateTimeRange) => {
+            onRangeSelection(range);
           }}
         />
+
         {isActive ? (
           <Popover.Panel
-            className={cx(
-              'absolute z-10 w-fit mt-2 rounded shadow-lg ring-1 ring-black ring-opacity-5 border dark:border-gray-600'
-            )}
+            className="absolute left-[50%] translate-x-[-50%] z-10 mt-2 w-fit rounded border shadow-lg dark:border-gray-600"
             static
           >
             <DateTimeRangePickerPanel
               range={range}
-              onChange={(from: DateUnion, to: DateUnion) => {
-                onRangeSelection(new DateTimeRange(from, to));
+              onRangeSelection={(range: DateTimeRange) => {
+                onRangeSelection(range);
+              }}
+              togglePopoverMenu={() => {
                 setIsActive(false);
               }}
             />

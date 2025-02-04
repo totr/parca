@@ -1,7 +1,7 @@
 run:
-  deadline: 7m
-  timeout: 5m
-  go: '1.18'
+  deadline: 12m
+  timeout: 10m
+  go: '1.21'
 
 linters:
   enable:
@@ -20,15 +20,23 @@ issues:
 
 linters-settings:
   depguard:
-    list-type: blacklist
-    include-go-root: true
-    packages-with-error-message:
-      - sync/atomic: "Use go.uber.org/atomic instead of sync/atomic"
-      - github.com/stretchr/testify/assert: "Use github.com/stretchr/testify/require instead of github.com/stretchr/testify/assert"
-      - github.com/go-kit/kit/log: "Use github.com/go-kit/log instead of github.com/go-kit/kit/log"
-      - github.com/pkg/errors: "Use fmt.Errorf instead"
+    rules:
+      Main:
+        deny:
+          - pkg: sync/atomic
+            desc: Use go.uber.org/atomic instead of sync/atomic
+          - pkg: github.com/stretchr/testify/assert
+            desc: Use github.com/stretchr/testify/require instead of github.com/stretchr/testify/assert
+          - pkg: github.com/go-kit/kit/log
+            desc: Use github.com/go-kit/log instead of github.com/go-kit/kit/log
+          - pkg: github.com/pkg/errors
+            desc: Use fmt.Errorf instead
+          - pkg: github.com/segmentio/parquet-go
+            desc: Use github.com/parquet-go/parquet-go instead
   errcheck:
-    exclude: ./.errcheck_excludes.txt
+    exclude-functions:
+      - (github.com/go-kit/log.Logger).Log
+      - (hash.Hash).Write
   goimports:
     local-prefixes: github.com/parca-dev/parca
   gofumpt:

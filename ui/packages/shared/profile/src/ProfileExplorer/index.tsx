@@ -11,23 +11,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import {QuerySelection} from '../ProfileSelector';
-import {ProfileSelection, ProfileSelectionFromParams, SuffixParams, NavigateFunction} from '..';
-import ProfileExplorerSingle from './ProfileExplorerSingle';
-import ProfileExplorerCompare from './ProfileExplorerCompare';
+import {useEffect, useMemo, useState} from 'react';
+
+import {Provider} from 'react-redux';
+
 import {QueryServiceClient} from '@parca/client';
-import {
-  useAppSelector,
-  useAppDispatch,
-  setCompare,
-  selectCompareMode,
-  setSearchNodeString,
-  store,
-  selectFilterByFunction,
-} from '@parca/store';
-import {Provider, batch} from 'react-redux';
-import {DateTimeRange} from '@parca/components';
-import {useEffect} from 'react';
+import {DateTimeRange, KeyDownProvider, useParcaContext} from '@parca/components';
+import {createStore} from '@parca/store';
+import {capitalizeOnlyFirstLetter, type NavigateFunction} from '@parca/utilities';
+
+import {ProfileSelection, ProfileSelectionFromParams, SuffixParams} from '..';
+import {QuerySelection, useProfileTypes} from '../ProfileSelector';
+import {sumByToParam, useSumByFromParams} from '../useSumBy';
+import ProfileExplorerCompare from './ProfileExplorerCompare';
+import ProfileExplorerSingle from './ProfileExplorerSingle';
 
 interface ProfileExplorerProps {
   queryClient: QueryServiceClient;
@@ -35,7 +32,18 @@ interface ProfileExplorerProps {
   navigateTo: NavigateFunction;
 }
 
-const getExpressionAsAString = (expression: string | []): string => {
+const ErrorContent = ({errorMessage}: {errorMessage: string}): JSX.Element => {
+  return (
+    <div
+      className="relative rounded border border-red-400 bg-red-100 px-4 py-3 text-red-700"
+      role="alert"
+    >
+      <span className="block sm:inline">{errorMessage}</span>
+    </div>
+  );
+};
+
+export const getExpressionAsAString = (expression: string | []): string => {
   const x = Array.isArray(expression) ? expression.join() : expression;
   return x;
 };
@@ -46,7 +54,7 @@ const sanitizeDateRange = (
   from_a: number,
   to_a: number
 ): {time_selection_a: string; from_a: number; to_a: number} => {
-  const range = DateTimeRange.fromRangeKey(time_selection_a);
+  const range = DateTimeRange.fromRangeKey(time_selection_a, from_a, to_a);
   if (from_a == null && to_a == null) {
     from_a = range.getFromMs();
     to_a = range.getToMs();
@@ -55,11 +63,42 @@ const sanitizeDateRange = (
 };
 /* eslint-enable @typescript-eslint/naming-convention */
 
+const filterEmptyParams = (o: Record<string, any>): Record<string, any> => {
+  return Object.fromEntries(
+    Object.entries(o)
+      .filter(
+        ([_, value]) =>
+          value !== '' && value !== undefined && (Array.isArray(value) ? value.length > 0 : true)
+      )
+      .map(([key, value]) => {
+        if (typeof value === 'string') {
+          return [key, value];
+        }
+        if (Array.isArray(value)) {
+          return [key, value];
+        }
+        return [key, value];
+      })
+  );
+};
+
 const filterSuffix = (
   o: {[key: string]: string | string[] | undefined},
   suffix: string
 ): {[key: string]: string | string[] | undefined} =>
-  Object.fromEntries(Object.entries(o).filter(([key]) => !key.endsWith(suffix)));
+  Object.fromEntries(
+    Object.entries(o)
+      .filter(([key]) => !key.endsWith(suffix))
+      .map(([key, value]) => {
+        if (typeof value === 'string') {
+          return [key, encodeURIComponent(value)];
+        }
+        if (Array.isArray(value)) {
+          return [key, value.map(v => encodeURIComponent(v))];
+        }
+        return [key, value];
+      })
+  );
 
 const swapQueryParameters = (o: {
   [key: string]: string | string[] | undefined;
@@ -77,35 +116,38 @@ const ProfileExplorerApp = ({
   queryParams,
   navigateTo,
 }: ProfileExplorerProps): JSX.Element => {
-  const dispatch = useAppDispatch();
-  const compareMode = useAppSelector(selectCompareMode);
+  const {
+    loading: profileTypesLoading,
+    data: profileTypesData,
+    error: profileTypesError,
+  } = useProfileTypes(queryClient);
+
+  const {loader, noDataPrompt, onError, authenticationErrorMessage} = useParcaContext();
+
+  useEffect(() => {
+    if (profileTypesError !== undefined && profileTypesError !== null) {
+      onError?.(profileTypesError);
+    }
+  }, [profileTypesError, onError]);
 
   /* eslint-disable @typescript-eslint/naming-convention */
   let {
     from_a,
     to_a,
-    merge_a,
-    profile_name_a,
-    labels_a,
-    time_a,
+    merge_from_a,
+    merge_to_a,
     time_selection_a,
     compare_a,
+    sum_by_a,
     from_b,
     to_b,
-    merge_b,
-    profile_name_b,
-    labels_b,
-    time_b,
+    merge_from_b,
+    merge_to_b,
     time_selection_b,
     compare_b,
+    sum_by_b,
+    filter_by_function,
   } = queryParams;
-  /* eslint-enable @typescript-eslint/naming-convention */
-  const filterByFunction = useAppSelector(selectFilterByFunction);
-
-  const sanitizedRange = sanitizeDateRange(time_selection_a, from_a, to_a);
-  time_selection_a = sanitizedRange.time_selection_a;
-  from_a = sanitizedRange.from_a;
-  to_a = sanitizedRange.to_a;
 
   // eslint-disable-next-line @typescript-eslint/naming-convention
   const expression_a = getExpressionAsAString(queryParams.expression_a);
@@ -113,20 +155,76 @@ const ProfileExplorerApp = ({
   // eslint-disable-next-line @typescript-eslint/naming-convention
   const expression_b = getExpressionAsAString(queryParams.expression_b);
 
+  // eslint-disable-next-line @typescript-eslint/naming-convention
+  const selection_a = getExpressionAsAString(queryParams.selection_a);
+
+  // eslint-disable-next-line @typescript-eslint/naming-convention
+  const selection_b = getExpressionAsAString(queryParams.selection_b);
+
+  /* eslint-enable @typescript-eslint/naming-convention */
+  const [profileA, setProfileA] = useState<ProfileSelection | null>(null);
+  const [profileB, setProfileB] = useState<ProfileSelection | null>(null);
+
+  const sumByA = useSumByFromParams(sum_by_a);
+  const sumByB = useSumByFromParams(sum_by_b);
+
+  useEffect(() => {
+    const mergeFrom = merge_from_a ?? undefined;
+    const mergeTo = merge_to_a ?? undefined;
+    const profileA = ProfileSelectionFromParams(
+      mergeFrom as string,
+      mergeTo as string,
+      selection_a,
+      filter_by_function as string
+    );
+
+    setProfileA(profileA);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [merge_from_a, merge_to_a, selection_a, filter_by_function]);
+
+  useEffect(() => {
+    const mergeFrom = merge_from_b ?? undefined;
+    const mergeTo = merge_to_b ?? undefined;
+    const profileB = ProfileSelectionFromParams(
+      mergeFrom as string,
+      mergeTo as string,
+      selection_b,
+      filter_by_function as string
+    );
+
+    setProfileB(profileB);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [merge_from_b, merge_to_b, selection_b, filter_by_function]);
+
+  if (profileTypesLoading) {
+    return <>{loader}</>;
+  }
+
+  if (profileTypesData?.types.length === 0) {
+    return <>{noDataPrompt}</>;
+  }
+
+  if (profileTypesError !== undefined && profileTypesError !== null) {
+    if (authenticationErrorMessage !== undefined && profileTypesError.code === 'UNAUTHENTICATED') {
+      return <ErrorContent errorMessage={authenticationErrorMessage} />;
+    }
+
+    return <ErrorContent errorMessage={capitalizeOnlyFirstLetter(profileTypesError.message)} />;
+  }
+
+  const sanitizedRange = sanitizeDateRange(time_selection_a, from_a, to_a);
+  time_selection_a = sanitizedRange.time_selection_a;
+  from_a = sanitizedRange.from_a;
+  to_a = sanitizedRange.to_a;
+
   if ((queryParams?.expression_a ?? '') !== '') queryParams.expression_a = expression_a;
   if ((queryParams?.expression_b ?? '') !== '') queryParams.expression_b = expression_b;
 
-  useEffect(() => {
-    if (compare_a === 'true' && compare_b === 'true') {
-      dispatch(setCompare(true));
-    } else {
-      dispatch(setCompare(false));
-    }
-  }, [dispatch, compare_a, compare_b]);
-
   const selectProfile = (p: ProfileSelection, suffix: string): void => {
     queryParams.expression_a = encodeURIComponent(queryParams.expression_a);
+    queryParams.selection_a = encodeURIComponent(queryParams.selection_a);
     queryParams.expression_b = encodeURIComponent(queryParams.expression_b);
+    queryParams.selection_b = encodeURIComponent(queryParams.selection_b);
     return navigateTo('/', {
       ...queryParams,
       ...SuffixParams(p.HistoryParams(), suffix),
@@ -141,44 +239,40 @@ const ProfileExplorerApp = ({
     return selectProfile(p, '_b');
   };
 
+  const queryA = {
+    expression: expression_a,
+    from: parseInt(from_a as string),
+    to: parseInt(to_a as string),
+    timeSelection: time_selection_a as string,
+    sumBy: sumByA,
+  };
+
   // Show the SingleProfileExplorer when not comparing
   if (compare_a !== 'true' && compare_b !== 'true') {
-    const query = {
-      expression: expression_a,
-      from: parseInt(from_a as string),
-      to: parseInt(to_a as string),
-      merge: (merge_a as string) === 'true',
-      profile_name: profile_name_a as string,
-      timeSelection: time_selection_a as string,
-    };
-
-    const profile = ProfileSelectionFromParams(
-      expression_a,
-      from_a as string,
-      to_a as string,
-      merge_a as string,
-      labels_a as string[],
-      profile_name_a as string,
-      time_a as string,
-      filterByFunction
-    );
-
     const selectQuery = (q: QuerySelection): void => {
+      const mergeParams =
+        q.mergeFrom !== undefined && q.mergeTo !== undefined
+          ? {
+              merge_from_a: q.mergeFrom,
+              merge_to_a: q.mergeTo,
+              selection_a: encodeURIComponent(q.expression),
+            }
+          : {};
       return navigateTo(
         '/',
         // Filtering the _a suffix causes us to reset potential profile
         // selection when running a new query.
-        {
+        filterEmptyParams({
           ...filterSuffix(queryParams, '_a'),
           ...{
             expression_a: encodeURIComponent(q.expression),
             from_a: q.from.toString(),
             to_a: q.to.toString(),
-            merge_a: q.merge,
             time_selection_a: q.timeSelection,
-            currentProfileView: 'icicle',
+            sum_by_a: sumByToParam(q.sumBy),
+            ...mergeParams,
           },
-        }
+        })
       );
     };
 
@@ -190,135 +284,85 @@ const ProfileExplorerApp = ({
       });
     };
 
-    const compareProfile = (): void => {
-      let compareQuery = {
-        compare_a: 'true',
-        expression_a: encodeURIComponent(query.expression),
-        from_a: query.from.toString(),
-        to_a: query.to.toString(),
-        merge_a: query.merge,
-        time_selection_a: query.timeSelection,
-        profile_name_a: query.profile_name,
-
-        compare_b: 'true',
-        expression_b: encodeURIComponent(query.expression),
-        from_b: query.from.toString(),
-        to_b: query.to.toString(),
-        merge_b: query.merge,
-        time_selection_b: query.timeSelection,
-        profile_name_b: query.profile_name,
-      };
-
-      if (profile != null) {
-        compareQuery = {
-          ...SuffixParams(profile.HistoryParams(), '_a'),
-          ...compareQuery,
-        };
-      }
-
-      compareQuery = {
-        ...compareQuery,
-        ...{
-          currentProfileView: 'icicle',
-        },
-      };
-
-      batch(() => {
-        dispatch(setCompare(!compareMode));
-        dispatch(setSearchNodeString(undefined));
-      });
-
-      void navigateTo('/', compareQuery);
-    };
-
     return (
       <ProfileExplorerSingle
         queryClient={queryClient}
-        query={query}
-        profile={profile}
+        query={queryA}
+        profile={profileA}
         selectQuery={selectQuery}
         selectProfile={selectProfile}
-        compareProfile={compareProfile}
         navigateTo={navigateTo}
       />
     );
   }
 
-  const queryA = {
-    expression: expression_a,
-    from: parseInt(from_a as string),
-    to: parseInt(to_a as string),
-    merge: (merge_a as string) === 'true',
-    timeSelection: time_selection_a as string,
-    profile_name: profile_name_a as string,
-  };
   const queryB = {
     expression: expression_b,
     from: parseInt(from_b as string),
     to: parseInt(to_b as string),
-    merge: (merge_b as string) === 'true',
     timeSelection: time_selection_b as string,
-    profile_name: profile_name_b as string,
+    sumBy: sumByB,
   };
 
-  const profileA = ProfileSelectionFromParams(
-    expression_a,
-    from_a as string,
-    to_a as string,
-    merge_a as string,
-    labels_a as string[],
-    profile_name_a as string,
-    time_a as string
-  );
-  const profileB = ProfileSelectionFromParams(
-    expression_b,
-    from_b as string,
-    to_b as string,
-    merge_b as string,
-    labels_b as string[],
-    profile_name_b as string,
-    time_b as string
-  );
-
   const selectQueryA = (q: QuerySelection): void => {
+    const mergeParams =
+      q.mergeFrom !== undefined && q.mergeTo !== undefined
+        ? {
+            merge_from_a: q.mergeFrom,
+            merge_to_a: q.mergeTo,
+            selection_a: encodeURIComponent(q.expression),
+          }
+        : {};
     return navigateTo(
       '/',
       // Filtering the _a suffix causes us to reset potential profile
       // selection when running a new query.
-      {
+      filterEmptyParams({
         ...filterSuffix(queryParams, '_a'),
         ...{
           compare_a: 'true',
           expression_a: encodeURIComponent(q.expression),
           expression_b: encodeURIComponent(expression_b),
+          selection_b: encodeURIComponent(selection_b),
           from_a: q.from.toString(),
           to_a: q.to.toString(),
-          merge_a: q.merge,
           time_selection_a: q.timeSelection,
-          filterByFunction,
+          sum_by_a: sumByToParam(q.sumBy),
+          filter_by_function: filter_by_function ?? '',
+          ...mergeParams,
         },
-      }
+      })
     );
   };
 
   const selectQueryB = (q: QuerySelection): void => {
+    const mergeParams =
+      q.mergeFrom !== undefined && q.mergeTo !== undefined
+        ? {
+            merge_from_b: q.mergeFrom,
+            merge_to_b: q.mergeTo,
+            selection_b: encodeURIComponent(q.expression),
+          }
+        : {};
     return navigateTo(
       '/',
       // Filtering the _b suffix causes us to reset potential profile
       // selection when running a new query.
-      {
+      filterEmptyParams({
         ...filterSuffix(queryParams, '_b'),
         ...{
           compare_b: 'true',
           expression_b: encodeURIComponent(q.expression),
           expression_a: encodeURIComponent(expression_a),
+          selection_a: encodeURIComponent(selection_a),
           from_b: q.from.toString(),
           to_b: q.to.toString(),
-          merge_b: q.merge,
           time_selection_b: q.timeSelection,
-          filterByFunction,
+          sum_by_b: sumByToParam(q.sumBy),
+          filter_by_function: filter_by_function ?? '',
+          ...mergeParams,
         },
-      }
+      })
     );
   };
 
@@ -328,15 +372,12 @@ const ProfileExplorerApp = ({
       newQueryParameters = swapQueryParameters(queryParams);
     }
 
-    batch(() => {
-      dispatch(setCompare(!compareMode));
-      dispatch(setSearchNodeString(undefined));
-    });
-
     return navigateTo('/', {
       ...filterSuffix(newQueryParameters, '_b'),
       ...{
         compare_a: 'false',
+        compare_b: 'false',
+        search_string: '',
       },
     });
   };
@@ -363,15 +404,21 @@ const ProfileExplorer = ({
   queryParams,
   navigateTo,
 }: ProfileExplorerProps): JSX.Element => {
-  const {store: reduxStore} = store();
+  const {additionalFlamegraphColorProfiles} = useParcaContext();
+
+  const {store: reduxStore} = useMemo(() => {
+    return createStore(additionalFlamegraphColorProfiles);
+  }, [additionalFlamegraphColorProfiles]);
 
   return (
     <Provider store={reduxStore}>
-      <ProfileExplorerApp
-        queryClient={queryClient}
-        queryParams={queryParams}
-        navigateTo={navigateTo}
-      />
+      <KeyDownProvider>
+        <ProfileExplorerApp
+          queryClient={queryClient}
+          queryParams={queryParams}
+          navigateTo={navigateTo}
+        />
+      </KeyDownProvider>
     </Provider>
   );
 };

@@ -1,4 +1,4 @@
-// Copyright 2022 The Parca Authors
+// Copyright 2022-2025 The Parca Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -15,6 +15,7 @@
 package addr2line
 
 import (
+	"context"
 	"debug/elf"
 	"testing"
 
@@ -24,6 +25,7 @@ import (
 	metastorev1alpha1 "github.com/parca-dev/parca/gen/proto/go/parca/metastore/v1alpha1"
 	"github.com/parca-dev/parca/pkg/profile"
 	"github.com/parca-dev/parca/pkg/symbol/demangle"
+	"github.com/parca-dev/parca/pkg/symbol/symbolsearcher"
 )
 
 func TestSymtabLiner_PCToLines(t *testing.T) {
@@ -174,16 +176,7 @@ func TestSymtabLiner_PCToLines(t *testing.T) {
 			args: args{
 				addr: 30,
 			},
-			wantLines: []profile.LocationLine{
-				{
-					Function: &metastorev1alpha1.Function{
-						Name:       "baz",
-						SystemName: "baz",
-						Filename:   "?",
-					},
-					Line: 0,
-				},
-			},
+			wantErr: true,
 		},
 		{
 			name: "C++ symbols are demangled",
@@ -213,12 +206,18 @@ func TestSymtabLiner_PCToLines(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// to pass elfSymIsFunction check
+			for i := range tt.fields.symbols {
+				tt.fields.symbols[i].Section = elf.SectionIndex(1)
+				tt.fields.symbols[i].Info = elf.ST_INFO(elf.STB_GLOBAL, elf.STT_FUNC)
+			}
+			searcher := symbolsearcher.New(tt.fields.symbols)
 			lnr := &SymtabLiner{
 				logger:    log.NewNopLogger(),
-				symbols:   tt.fields.symbols,
+				searcher:  searcher,
 				demangler: demangle.NewDemangler("simple", false),
 			}
-			gotLines, err := lnr.PCToLines(tt.args.addr)
+			gotLines, err := lnr.PCToLines(context.Background(), tt.args.addr)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("PCToLines() error = %v, wantErr %v", err, tt.wantErr)
 				return

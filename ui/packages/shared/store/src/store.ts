@@ -11,34 +11,37 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import {configureStore, combineReducers} from '@reduxjs/toolkit';
-import profileReducer, {ProfileState} from './slices/profileSlice';
-import uiReducer, {UiState} from './slices/uiSlice';
-import storage from 'redux-persist/lib/storage';
+import {combineReducers, configureStore} from '@reduxjs/toolkit';
+import type {Store} from 'redux';
 import {
-  persistReducer,
   FLUSH,
-  REHYDRATE,
   PAUSE,
   PERSIST,
   PURGE,
   REGISTER,
+  REHYDRATE,
+  persistReducer,
   persistStore,
-  Persistor,
+  type Persistor,
 } from 'redux-persist';
-import {Store} from 'redux';
+import storage from 'redux-persist/lib/storage';
+
+import {type ColorConfig} from '@parca/utilities';
+
+import colorsReducer, {initialColorState} from './slices/colorsSlice';
+import profileReducer from './slices/profileSlice';
+import uiReducer from './slices/uiSlice';
 
 const rootReducer = combineReducers({
   ui: uiReducer,
   profile: profileReducer,
+  colors: colorsReducer,
 });
 
 const slicesToPersist = ['ui'];
 
 // Infer the `RootState` and `AppDispatch` types from the store itself
 export type RootState = ReturnType<typeof rootReducer>;
-// Inferred type: {posts: PostsState, comments: CommentsState, users: UsersState}
-export type AppDispatch = typeof store.dispatch;
 
 const persistConfig = {
   key: 'root',
@@ -49,22 +52,43 @@ const persistConfig = {
 
 const persistedReducer = persistReducer(persistConfig, rootReducer);
 
-const store = configureStore({
-  reducer: persistedReducer,
-  devTools: process.env.NODE_ENV !== 'production',
-  middleware: getDefaultMiddleware =>
-    getDefaultMiddleware({
-      serializableCheck: {
-        ignoredActions: [FLUSH, REHYDRATE, PAUSE, PERSIST, PURGE, REGISTER],
+export const createStore = (
+  additionalColorProfiles: Record<string, ColorConfig> = {}
+): {store: Store; persistor: Persistor} => {
+  const store = configureStore({
+    reducer: persistedReducer,
+    devTools: import.meta.env?.DEV ?? false,
+    middleware: getDefaultMiddleware =>
+      getDefaultMiddleware({
+        serializableCheck: {
+          ignoredActions: [
+            FLUSH,
+            REHYDRATE,
+            PAUSE,
+            PERSIST,
+            PURGE,
+            REGISTER,
+            'colors/setHoveringNode',
+          ],
+          ignoredPaths: ['colors.hoveringNode'],
+        },
+      }),
+    preloadedState: {
+      colors: {
+        ...initialColorState,
+        colorProfiles: {...initialColorState.colorProfiles, ...additionalColorProfiles},
       },
-    }),
-});
+    },
+  });
 
-const defaultExports = (): {store: Store; persistor: Persistor} => {
   const persistor = persistStore(store);
   return {store, persistor};
 };
 
-export type {ProfileState, UiState};
+type StoreAndPersistor = ReturnType<typeof createStore>;
+type AppStore = StoreAndPersistor['store'];
+export type AppDispatch = AppStore['dispatch'];
 
-export default defaultExports;
+export * from './slices/uiSlice';
+export * from './slices/profileSlice';
+export * from './slices/colorsSlice';

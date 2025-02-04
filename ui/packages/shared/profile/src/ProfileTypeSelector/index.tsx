@@ -11,10 +11,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import React, {useMemo} from 'react';
-import {ProfileType, ProfileTypesResponse} from '@parca/client';
+import {useMemo} from 'react';
+
 import {RpcError} from '@protobuf-ts/runtime-rpc';
-import {SelectElement, Select} from '@parca/components';
+
+import {ProfileType, ProfileTypesResponse} from '@parca/client';
+import {Select, type SelectElement} from '@parca/components';
 
 interface WellKnownProfile {
   name: string;
@@ -34,13 +36,11 @@ export const wellKnownProfiles: WellKnownProfiles = {
     name: 'Block Contention Time Total',
     help: 'Time delayed stack traces caused by blocking on synchronization primitives.',
   },
-  // Unfortunately, fgprof does not set the period type and unit.
-  'fgprof:samples:count::': {
+  'fgprof:samples:count:wallclock:nanoseconds:delta': {
     name: 'Fgprof Samples Total',
     help: 'CPU profile samples observed regardless of their current On/Off CPU scheduling status',
   },
-  // Unfortunately, fgprof does not set the period type and unit.
-  'fgprof:time:nanoseconds::': {
+  'fgprof:time:nanoseconds:wallclock:nanoseconds:delta': {
     name: 'Fgprof Samples Time Total',
     help: 'CPU profile measured regardless of their current On/Off CPU scheduling status in nanoseconds',
   },
@@ -92,9 +92,17 @@ export const wellKnownProfiles: WellKnownProfiles = {
     name: 'CPU Samples',
     help: 'CPU profile samples observed by Parca Agent.',
   },
+  'otel_profiling_agent_on_cpu:samples:count:cpu:nanoseconds:delta': {
+    name: 'On-CPU Samples',
+    help: 'On CPU profile samples observed by the Otel Profiling Agent.',
+  },
+  'parca_agent:samples:count:cpu:nanoseconds:delta': {
+    name: 'On-CPU',
+    help: 'On CPU profile samples observed by the Parca Agent.',
+  },
 };
 
-function flexibleWellKnownProfileMatching(name: string): WellKnownProfile | undefined {
+export function flexibleWellKnownProfileMatching(name: string): WellKnownProfile | undefined {
   const prefixExcludedName = name.split(':').slice(1).join(':');
   const deltaExcludedName = prefixExcludedName.replace(/:delta$/, '');
   const requiredKey = Object.keys(wellKnownProfiles).find(key => {
@@ -106,7 +114,7 @@ function flexibleWellKnownProfileMatching(name: string): WellKnownProfile | unde
   return requiredKey != null ? wellKnownProfiles[requiredKey] : undefined;
 }
 
-function profileSelectElement(
+export function profileSelectElement(
   name: string,
   flexibleKnownProfilesDetection: boolean
 ): SelectElement {
@@ -128,17 +136,16 @@ function profileSelectElement(
   };
 }
 
+export const constructProfileName = (type: ProfileType): string => {
+  return `${type.name}:${type.sampleType}:${type.sampleUnit}:${type.periodType}:${type.periodUnit}${
+    type.delta ? ':delta' : ''
+  }`;
+};
+
 export const normalizeProfileTypesData = (types: ProfileType[]): string[] => {
-  return types
-    .map(
-      type =>
-        `${type.name}:${type.sampleType}:${type.sampleUnit}:${type.periodType}:${type.periodUnit}${
-          type.delta ? ':delta' : ''
-        }`
-    )
-    .sort((a: string, b: string): number => {
-      return a.localeCompare(b);
-    });
+  return types.map(constructProfileName).sort((a: string, b: string): number => {
+    return a.localeCompare(b);
+  });
 };
 
 interface Props {
@@ -148,6 +155,7 @@ interface Props {
   selectedKey: string | undefined;
   flexibleKnownProfilesDetection?: boolean;
   onSelection: (value: string | undefined) => void;
+  disabled?: boolean;
 }
 
 const ProfileTypeSelector = ({
@@ -157,6 +165,7 @@ const ProfileTypeSelector = ({
   selectedKey,
   onSelection,
   flexibleKnownProfilesDetection = false,
+  disabled,
 }: Props): JSX.Element => {
   const profileNames = useMemo(() => {
     return (error === undefined || error == null) &&
@@ -176,8 +185,10 @@ const ProfileTypeSelector = ({
       items={profileLabels}
       selectedKey={selectedKey}
       onSelection={onSelection}
-      placeholder="Select profile..."
+      placeholder="Select profile type..."
       loading={loading}
+      className="bg-white h-profile-type-dropdown"
+      disabled={disabled}
     />
   );
 };

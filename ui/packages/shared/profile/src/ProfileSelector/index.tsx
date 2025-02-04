@@ -11,35 +11,67 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import {Query} from '@parca/parser';
-import {QueryServiceClient, ProfileTypesResponse} from '@parca/client';
+import {Dispatch, SetStateAction, useEffect, useMemo, useRef, useState} from 'react';
+
 import {RpcError} from '@protobuf-ts/runtime-rpc';
-import {ProfileSelection} from '..';
-import React, {useEffect, useState} from 'react';
-import ProfileMetricsGraph from '../ProfileMetricsGraph';
-import MatchersInput from '../MatchersInput/index';
-import MergeButton from './MergeButton';
-import CompareButton from './CompareButton';
+
+import {ProfileTypesResponse, QueryServiceClient} from '@parca/client';
 import {
-  Card,
-  DateTimeRangePicker,
   DateTimeRange,
-  Button,
-  ButtonGroup,
+  IconButton,
   useGrpcMetadata,
+  useParcaContext,
+  useURLState,
 } from '@parca/components';
 import {CloseIcon} from '@parca/icons';
-import ProfileTypeSelector from '../ProfileTypeSelector/index';
+import {Query} from '@parca/parser';
+import {type NavigateFunction} from '@parca/utilities';
+
+import {ProfileSelection} from '..';
+import {useLabelNames} from '../MatchersInput/index';
+import {useMetricsGraphDimensions} from '../MetricsGraph/useMetricsGraphDimensions';
+import {UtilizationLabelsProvider} from '../contexts/UtilizationLabelsContext';
+import {useDefaultSumBy, useSumBySelection} from '../useSumBy';
+import {MetricsGraphSection} from './MetricsGraphSection';
+import {QueryControls} from './QueryControls';
+import {useAutoQuerySelector} from './useAutoQuerySelector';
 
 export interface QuerySelection {
   expression: string;
   from: number;
   to: number;
-  merge: boolean;
   timeSelection: string;
+  sumBy?: string[];
+  mergeFrom?: number;
+  mergeTo?: number;
 }
 
-interface ProfileSelectorProps {
+interface ProfileSelectorFeatures {
+  showMetricsGraph: boolean;
+  showSumBySelector?: boolean;
+  showProfileTypeSelector?: boolean;
+  disableExplorativeQuerying?: boolean;
+  disableProfileTypesDropdown?: boolean;
+}
+
+export interface UtilizationMetrics {
+  timestamp: number;
+  value: number;
+  resource: {
+    [key: string]: string;
+  };
+  attributes: {
+    [key: string]: string;
+  };
+}
+
+export interface UtilizationLabels {
+  utilizationLabelNames?: string[];
+  utilizationFetchLabelValues?: (key: string) => Promise<string[]>;
+  utilizationLabelValues?: string[];
+}
+
+interface ProfileSelectorProps extends ProfileSelectorFeatures {
   queryClient: QueryServiceClient;
   querySelection: QuerySelection;
   selectProfile: (source: ProfileSelection) => void;
@@ -48,7 +80,12 @@ interface ProfileSelectorProps {
   enforcedProfileName: string;
   profileSelection: ProfileSelection | null;
   comparing: boolean;
-  onCompareProfile: () => void;
+  navigateTo: NavigateFunction;
+  setDisplayHideMetricsGraphButton: Dispatch<SetStateAction<boolean>>;
+  suffix?: string;
+  utilizationMetrics?: UtilizationMetrics[];
+  utilizationMetricsLoading?: boolean;
+  utilizationLabels?: UtilizationLabels;
 }
 
 export interface IProfileTypesResult {
@@ -86,18 +123,69 @@ const ProfileSelector = ({
   enforcedProfileName,
   profileSelection,
   comparing,
-  onCompareProfile,
+  navigateTo,
+  showMetricsGraph = true,
+  showSumBySelector = true,
+  showProfileTypeSelector = true,
+  disableExplorativeQuerying = false,
+  setDisplayHideMetricsGraphButton,
+  utilizationMetrics,
+  utilizationMetricsLoading,
+  utilizationLabels,
 }: ProfileSelectorProps): JSX.Element => {
   const {
     loading: profileTypesLoading,
     data: profileTypesData,
     error,
   } = useProfileTypes(queryClient);
+  const {heightStyle} = useMetricsGraphDimensions(comparing);
+  const {viewComponent} = useParcaContext();
+  const [queryBrowserMode, setQueryBrowserMode] = useURLState('query_browser_mode');
 
   const [timeRangeSelection, setTimeRangeSelection] = useState(
-    DateTimeRange.fromRangeKey(querySelection.timeSelection)
+    DateTimeRange.fromRangeKey(querySelection.timeSelection, querySelection.from, querySelection.to)
   );
+
   const [queryExpressionString, setQueryExpressionString] = useState(querySelection.expression);
+
+  const [advancedModeForQueryBrowser, setAdvancedModeForQueryBrowser] = useState(
+    queryBrowserMode === 'advanced'
+  );
+
+  const profileType = useMemo(() => {
+    return Query.parse(queryExpressionString).profileType();
+  }, [queryExpressionString]);
+
+  const selectedProfileType = useMemo(() => {
+    return Query.parse(querySelection.expression).profileType();
+  }, [querySelection.expression]);
+
+  const {loading: labelNamesLoading, result} = useLabelNames(queryClient, profileType.toString());
+  const {loading: selectedLabelNamesLoading, result: selectedLabelNamesResult} = useLabelNames(
+    queryClient,
+    selectedProfileType.toString()
+  );
+
+  const labels = useMemo(() => {
+    return result.response?.labelNames === undefined ? [] : result.response.labelNames;
+  }, [result]);
+
+  const selectedLabels = useMemo(() => {
+    return selectedLabelNamesResult.response?.labelNames === undefined
+      ? []
+      : selectedLabelNamesResult.response.labelNames;
+  }, [selectedLabelNamesResult]);
+
+  const [sumBySelection, setUserSumBySelection, {isLoading: sumBySelectionLoading}] =
+    useSumBySelection(profileType, labelNamesLoading, labels, {
+      defaultValue: querySelection.sumBy,
+    });
+
+  const {defaultSumBy, isLoading: defaultSumByLoading} = useDefaultSumBy(
+    selectedProfileType,
+    selectedLabelNamesLoading,
+    selectedLabels
+  );
 
   useEffect(() => {
     if (enforcedProfileName !== '') {
@@ -122,32 +210,30 @@ const ProfileSelector = ({
     enforcedProfileName !== '' ? enforcedProfileNameQuery() : Query.parse(queryExpressionString);
   const selectedProfileName = query.profileName();
 
-  const setNewQueryExpression = (expr: string, merge: boolean): void => {
+  const setNewQueryExpression = (expr: string, updateTs = false): void => {
+    const query = enforcedProfileName !== '' ? enforcedProfileNameQuery() : Query.parse(expr);
+    const delta = query.profileType().delta;
+    const from = timeRangeSelection.getFromMs(updateTs);
+    const to = timeRangeSelection.getToMs(updateTs);
+    const mergeParams = delta
+      ? {
+          mergeFrom: from,
+          mergeTo: to,
+        }
+      : {};
+
     selectQuery({
       expression: expr,
-      from: timeRangeSelection.getFromMs(),
-      to: timeRangeSelection.getToMs(),
-      merge,
+      from,
+      to,
       timeSelection: timeRangeSelection.getRangeKey(),
+      sumBy: sumBySelection,
+      ...mergeParams,
     });
   };
 
-  const setQueryExpression = (): void => {
-    setNewQueryExpression(query.toString(), false);
-  };
-
-  const addLabelMatcher = (key: string, value: string): void => {
-    // When a user clicks on a label on the metrics graph tooltip,
-    // replace single `\` in the `value` string with doubles `\\` if available.
-    const newValue = value.includes('\\') ? value.replaceAll('\\', '\\\\') : value;
-    const [newQuery, changed] = Query.parse(queryExpressionString).setMatcher(key, newValue);
-    if (changed) {
-      setNewQueryExpression(newQuery.toString(), false);
-    }
-  };
-
-  const setMergedSelection = (): void => {
-    setNewQueryExpression(queryExpressionString, true);
+  const setQueryExpression = (updateTs = false): void => {
+    setNewQueryExpression(query.toString(), updateTs);
   };
 
   const setMatchersString = (matchers: string): void => {
@@ -166,107 +252,89 @@ const ProfileSelector = ({
     }
   };
 
-  const handleCompareClick = (): void => onCompareProfile();
+  useEffect(() => {
+    if (viewComponent !== undefined) {
+      viewComponent.emitQuery(query.toString());
+    }
+  }, [query, viewComponent]);
+
+  useAutoQuerySelector({
+    selectedProfileName,
+    profileTypesData,
+    setProfileName,
+    setQueryExpression,
+    querySelection: {...querySelection, sumBy: sumBySelection},
+    navigateTo,
+    loading: sumBySelectionLoading,
+  });
 
   const searchDisabled =
     queryExpressionString === undefined ||
     queryExpressionString === '' ||
     queryExpressionString === '{}';
 
-  const mergeDisabled = selectedProfileName === '' || querySelection.expression === undefined;
-  const compareDisabled = selectedProfileName === '' || querySelection.expression === undefined;
+  const queryBrowserRef = useRef<HTMLDivElement>(null);
+  const sumByRef = useRef(null);
 
   return (
-    <Card>
-      <Card.Header className="flex space-x-2">
-        <div className="flex flex-wrap w-full justify-start space-x-2 space-y-1">
-          <div className="ml-2 mt-1">
-            <ProfileTypeSelector
-              profileTypesData={profileTypesData}
-              loading={profileTypesLoading}
-              selectedKey={selectedProfileName}
-              onSelection={setProfileName}
-              error={error}
-            />
-          </div>
-          <div className="w-full flex-1">
-            <MatchersInput
-              queryClient={queryClient}
-              setMatchersString={setMatchersString}
-              runQuery={setQueryExpression}
-              currentQuery={query}
-            />
-          </div>
-          <DateTimeRangePicker
-            onRangeSelection={setTimeRangeSelection}
-            range={timeRangeSelection}
+    <UtilizationLabelsProvider value={utilizationLabels}>
+      <>
+        <div className="mb-2 flex">
+          <QueryControls
+            showProfileTypeSelector={showProfileTypeSelector}
+            showSumBySelector={showSumBySelector}
+            disableExplorativeQuerying={disableExplorativeQuerying}
+            profileTypesData={profileTypesData}
+            profileTypesLoading={profileTypesLoading}
+            selectedProfileName={selectedProfileName}
+            setProfileName={setProfileName}
+            setMatchersString={setMatchersString}
+            setQueryExpression={setQueryExpression}
+            query={query}
+            queryBrowserRef={queryBrowserRef}
+            timeRangeSelection={timeRangeSelection}
+            setTimeRangeSelection={setTimeRangeSelection}
+            searchDisabled={searchDisabled}
+            queryBrowserMode={queryBrowserMode as string}
+            setQueryBrowserMode={setQueryBrowserMode}
+            advancedModeForQueryBrowser={advancedModeForQueryBrowser}
+            setAdvancedModeForQueryBrowser={setAdvancedModeForQueryBrowser}
+            queryClient={queryClient}
+            sumByRef={sumByRef}
+            labels={labels}
+            sumBySelection={sumBySelection ?? []}
+            setUserSumBySelection={setUserSumBySelection}
+            profileType={profileType}
+            profileTypesError={error}
           />
-          <ButtonGroup>
-            {!searchDisabled && (
-              <>
-                <MergeButton disabled={mergeDisabled} onClick={setMergedSelection} />
-                {!comparing && (
-                  <CompareButton disabled={compareDisabled} onClick={handleCompareClick} />
-                )}
-              </>
-            )}
-            <Button
-              disabled={searchDisabled}
-              onClick={(e: React.MouseEvent<HTMLElement>) => {
-                e.preventDefault();
-                setQueryExpression();
-              }}
-            >
-              Search
-            </Button>
-          </ButtonGroup>
-        </div>
-        <div>
           {comparing && (
-            <button type="button" onClick={() => closeProfile()}>
-              <CloseIcon />
-            </button>
+            <div>
+              <IconButton onClick={() => closeProfile()} icon={<CloseIcon />} />
+            </div>
           )}
         </div>
-      </Card.Header>
-      {!querySelection.merge && (
-        <Card.Body>
-          {querySelection.expression !== undefined &&
-          querySelection.expression.length > 0 &&
-          querySelection.from !== undefined &&
-          querySelection.to !== undefined &&
-          (profileSelection == null || profileSelection.Type() !== 'merge') ? (
-            <ProfileMetricsGraph
-              queryClient={queryClient}
-              queryExpression={querySelection.expression}
-              from={querySelection.from}
-              to={querySelection.to}
-              select={selectProfile}
-              profile={profileSelection}
-              setTimeRange={(range: DateTimeRange) => {
-                setTimeRangeSelection(range);
-                selectQuery({
-                  expression: queryExpressionString,
-                  from: range.getFromMs(),
-                  to: range.getToMs(),
-                  merge: false,
-                  timeSelection: range.getRangeKey(),
-                });
-              }}
-              addLabelMatcher={addLabelMatcher}
-            />
-          ) : (
-            <>
-              {(profileSelection == null || profileSelection.Type() !== 'merge') && (
-                <div className="my-20 text-center">
-                  <p>Run a query, and the result will be displayed here.</p>
-                </div>
-              )}
-            </>
-          )}
-        </Card.Body>
-      )}
-    </Card>
+        <MetricsGraphSection
+          showMetricsGraph={showMetricsGraph}
+          setDisplayHideMetricsGraphButton={setDisplayHideMetricsGraphButton}
+          heightStyle={heightStyle}
+          querySelection={querySelection}
+          profileSelection={profileSelection}
+          comparing={comparing}
+          sumBy={querySelection.sumBy ?? defaultSumBy ?? []}
+          defaultSumByLoading={defaultSumByLoading}
+          queryClient={queryClient}
+          queryExpressionString={queryExpressionString}
+          setTimeRangeSelection={setTimeRangeSelection}
+          selectQuery={selectQuery}
+          selectProfile={selectProfile}
+          query={query}
+          setQueryExpression={setQueryExpression}
+          setNewQueryExpression={setNewQueryExpression}
+          utilizationMetrics={utilizationMetrics}
+          utilizationMetricsLoading={utilizationMetricsLoading}
+        />
+      </>
+    </UtilizationLabelsProvider>
   );
 };
 

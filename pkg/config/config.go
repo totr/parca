@@ -1,4 +1,4 @@
-// Copyright 2022 The Parca Authors
+// Copyright 2022-2025 The Parca Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -14,6 +14,7 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"net/url"
@@ -30,7 +31,7 @@ import (
 	"github.com/prometheus/prometheus/discovery/targetgroup"
 	"github.com/prometheus/prometheus/model/relabel"
 	"github.com/thanos-io/objstore/client"
-	"gopkg.in/yaml.v2"
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -55,6 +56,7 @@ type ObjectStorage struct {
 func (c *Config) Validate() error {
 	if err := validation.ValidateStruct(c,
 		validation.Field(&c.ObjectStorage, validation.Required, ObjectStorageValid),
+		validation.Field(&c.ScrapeConfigs, ScrapeConfigsValid),
 	); err != nil {
 		return err
 	}
@@ -119,8 +121,9 @@ func (c *Config) SetDirectory(dir string) {
 func Load(s string) (*Config, error) {
 	cfg := &Config{}
 
-	err := yaml.UnmarshalStrict([]byte(s), cfg)
-	if err != nil {
+	dec := yaml.NewDecoder(bytes.NewBuffer([]byte(s)))
+	dec.KnownFields(true)
+	if err := dec.Decode(cfg); err != nil {
 		return nil, err
 	}
 
@@ -254,13 +257,13 @@ func (c *ScrapeConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 
 	// Validate the scrape and timeout internal configuration. When /debug/pprof/profile scraping
 	// is enabled we need to make sure there is enough time to complete the scrape.
-	if c.ScrapeTimeout > c.ScrapeInterval {
-		return fmt.Errorf("scrape timeout must be smaller or equal to inverval for: %v", c.JobName)
+	if c.ScrapeTimeout == 0 {
+		c.ScrapeTimeout = c.ScrapeInterval + model.Duration(3*time.Second)
+	}
+	if c.ScrapeTimeout <= c.ScrapeInterval {
+		return fmt.Errorf("scrape timeout must be greater than the interval: %v", c.JobName)
 	}
 
-	if c.ScrapeTimeout == 0 {
-		c.ScrapeTimeout = c.ScrapeInterval
-	}
 	if cfg, ok := c.ProfilingConfig.PprofConfig[pprofProcessCPU]; ok {
 		if *cfg.Enabled && c.ScrapeTimeout < model.Duration(time.Second*2) {
 			return fmt.Errorf("%v scrape_timeout must be at least 2 seconds in %v", pprofProcessCPU, c.JobName)
@@ -288,9 +291,16 @@ func checkStaticTargets(configs discovery.Configs) error {
 }
 
 type PprofProfilingConfig struct {
-	Enabled *bool  `yaml:"enabled,omitempty"`
-	Path    string `yaml:"path,omitempty"`
-	Delta   bool   `yaml:"delta,omitempty"`
+	Enabled        *bool        `yaml:"enabled,omitempty"`
+	Path           string       `yaml:"path,omitempty"`
+	Delta          bool         `yaml:"delta,omitempty"`
+	KeepSampleType []SampleType `yaml:"keep_sample_type,omitempty"`
+	Seconds        int          `yaml:"seconds,omitempty"`
+}
+
+type SampleType struct {
+	Type string `yaml:"type,omitempty"`
+	Unit string `yaml:"unit,omitempty"`
 }
 
 // CheckTargetAddress checks if target address is valid.

@@ -12,31 +12,40 @@
 // limitations under the License.
 
 import Tab from '../../Tab';
-import type {DateTimeRange, DateUnion} from '../utils';
-import RelativeDatePicker from './RelativeDatePicker';
-import AbsoluteDatePicker from './AbsoluteDatePicker';
+import AbsoluteDatePicker from '../AbsoluteDatePicker';
+import {RelativeDatePickerForPanel} from '../RelativeDatePicker';
+import {DateTimeRange, DateUnion} from '../utils';
 
 interface DateTimeRangePickerProps {
   range: DateTimeRange;
-  onChange?: (from: DateUnion, to: DateUnion) => void;
+  onRangeSelection: (range: DateTimeRange) => void;
+  togglePopoverMenu: () => void;
 }
 
 const DateTimeRangePickerPanel = ({
   range,
-  onChange = () => null,
+  onRangeSelection,
+  togglePopoverMenu,
 }: DateTimeRangePickerProps): JSX.Element => {
   return (
-    <div className="w-[300px] p-2 rounded bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300">
+    <div className="w-[300px] rounded bg-gray-100 py-4 text-gray-600 dark:bg-gray-800 dark:text-gray-300">
       <Tab
         tabs={['Relative', 'Absolute']}
         panels={[
-          <RelativeDatePicker
+          <RelativeDatePickerForPanel
+            onChange={(from: DateUnion, to: DateUnion) => {
+              onRangeSelection(new DateTimeRange(from, to));
+            }}
             range={range}
-            onChange={(from, to) => onChange(from as DateUnion, to as DateUnion)}
+            key={0}
+            hidePopoverMenu={togglePopoverMenu}
           />,
           <AbsoluteDatePicker
             range={range}
-            onChange={(from, to) => onChange(from as DateUnion, to as DateUnion)}
+            onChange={(from: DateUnion, to: DateUnion) => {
+              onRangeSelection(new DateTimeRange(from, to));
+            }}
+            key={1}
           />,
         ]}
         defaultTabIndex={range.from.isRelative() ? 0 : 1}

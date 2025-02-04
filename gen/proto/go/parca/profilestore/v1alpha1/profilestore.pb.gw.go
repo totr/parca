@@ -35,11 +35,7 @@ func request_ProfileStoreService_WriteRaw_0(ctx context.Context, marshaler runti
 	var protoReq WriteRawRequest
 	var metadata runtime.ServerMetadata
 
-	newReader, berr := utilities.IOReaderFactory(req.Body)
-	if berr != nil {
-		return nil, metadata, status.Errorf(codes.InvalidArgument, "%v", berr)
-	}
-	if err := marshaler.NewDecoder(newReader()).Decode(&protoReq); err != nil && err != io.EOF {
+	if err := marshaler.NewDecoder(req.Body).Decode(&protoReq); err != nil && err != io.EOF {
 		return nil, metadata, status.Errorf(codes.InvalidArgument, "%v", err)
 	}
 
@@ -52,17 +48,56 @@ func local_request_ProfileStoreService_WriteRaw_0(ctx context.Context, marshaler
 	var protoReq WriteRawRequest
 	var metadata runtime.ServerMetadata
 
-	newReader, berr := utilities.IOReaderFactory(req.Body)
-	if berr != nil {
-		return nil, metadata, status.Errorf(codes.InvalidArgument, "%v", berr)
-	}
-	if err := marshaler.NewDecoder(newReader()).Decode(&protoReq); err != nil && err != io.EOF {
+	if err := marshaler.NewDecoder(req.Body).Decode(&protoReq); err != nil && err != io.EOF {
 		return nil, metadata, status.Errorf(codes.InvalidArgument, "%v", err)
 	}
 
 	msg, err := server.WriteRaw(ctx, &protoReq)
 	return msg, metadata, err
 
+}
+
+func request_ProfileStoreService_Write_0(ctx context.Context, marshaler runtime.Marshaler, client ProfileStoreServiceClient, req *http.Request, pathParams map[string]string) (ProfileStoreService_WriteClient, runtime.ServerMetadata, error) {
+	var metadata runtime.ServerMetadata
+	stream, err := client.Write(ctx)
+	if err != nil {
+		grpclog.Errorf("Failed to start streaming: %v", err)
+		return nil, metadata, err
+	}
+	dec := marshaler.NewDecoder(req.Body)
+	handleSend := func() error {
+		var protoReq WriteRequest
+		err := dec.Decode(&protoReq)
+		if err == io.EOF {
+			return err
+		}
+		if err != nil {
+			grpclog.Errorf("Failed to decode request: %v", err)
+			return err
+		}
+		if err := stream.Send(&protoReq); err != nil {
+			grpclog.Errorf("Failed to send request: %v", err)
+			return err
+		}
+		return nil
+	}
+	go func() {
+		for {
+			if err := handleSend(); err != nil {
+				break
+			}
+		}
+		if err := stream.CloseSend(); err != nil {
+			grpclog.Errorf("Failed to terminate client stream: %v", err)
+		}
+	}()
+	header, err := stream.Header()
+	if err != nil {
+		grpclog.Errorf("Failed to get header from client: %v", err)
+		return nil, metadata, err
+	}
+	metadata.HeaderMD = header
+	return stream, metadata, nil
 }
 
 func request_AgentsService_Agents_0(ctx context.Context, marshaler runtime.Marshaler, client AgentsServiceClient, req *http.Request, pathParams map[string]string) (proto.Message, runtime.ServerMetadata, error) {
@@ -87,6 +122,7 @@ func local_request_AgentsService_Agents_0(ctx context.Context, marshaler runtime
 // UnaryRPC     :call ProfileStoreServiceServer directly.
 // StreamingRPC :currently unsupported pending https://github.com/grpc/grpc-go/issues/906.
 // Note that using this registration option will cause many gRPC library features to stop working. Consider using RegisterProfileStoreServiceHandlerFromEndpoint instead.
+// GRPC interceptors will not work for this type of registration. To use interceptors, you must use the "runtime.WithMiddlewares" option in the "runtime.NewServeMux" call.
 func RegisterProfileStoreServiceHandlerServer(ctx context.Context, mux *runtime.ServeMux, server ProfileStoreServiceServer) error {
 
 	mux.Handle("POST", pattern_ProfileStoreService_WriteRaw_0, func(w http.ResponseWriter, req *http.Request, pathParams map[string]string) {
@@ -114,6 +150,13 @@ func RegisterProfileStoreServiceHandlerServer(ctx context.Context, mux *runtime.
 
 	})
 
+	mux.Handle("POST", pattern_ProfileStoreService_Write_0, func(w http.ResponseWriter, req *http.Request, pathParams map[string]string) {
+		err := status.Error(codes.Unimplemented, "streaming calls are not yet supported in the in-process transport")
+		_, outboundMarshaler := runtime.MarshalerForRequest(mux, req)
+		runtime.HTTPError(ctx, mux, outboundMarshaler, w, req, err)
+		return
+	})
+
 	return nil
 }
 
@@ -121,6 +164,7 @@ func RegisterProfileStoreServiceHandlerServer(ctx context.Context, mux *runtime.
 // UnaryRPC     :call AgentsServiceServer directly.
 // StreamingRPC :currently unsupported pending https://github.com/grpc/grpc-go/issues/906.
 // Note that using this registration option will cause many gRPC library features to stop working. Consider using RegisterAgentsServiceHandlerFromEndpoint instead.
+// GRPC interceptors will not work for this type of registration. To use interceptors, you must use the "runtime.WithMiddlewares" option in the "runtime.NewServeMux" call.
 func RegisterAgentsServiceHandlerServer(ctx context.Context, mux *runtime.ServeMux, server AgentsServiceServer) error {
 
 	mux.Handle("GET", pattern_AgentsService_Agents_0, func(w http.ResponseWriter, req *http.Request, pathParams map[string]string) {
@@ -154,21 +198,21 @@ func RegisterAgentsServiceHandlerServer(ctx context.Context, mux *runtime.ServeM
 // RegisterProfileStoreServiceHandlerFromEndpoint is same as RegisterProfileStoreServiceHandler but
 // automatically dials to "endpoint" and closes the connection when "ctx" gets done.
 func RegisterProfileStoreServiceHandlerFromEndpoint(ctx context.Context, mux *runtime.ServeMux, endpoint string, opts []grpc.DialOption) (err error) {
-	conn, err := grpc.Dial(endpoint, opts...)
+	conn, err := grpc.NewClient(endpoint, opts...)
 	if err != nil {
 		return err
 	}
 	defer func() {
 		if err != nil {
 			if cerr := conn.Close(); cerr != nil {
-				grpclog.Infof("Failed to close conn to %s: %v", endpoint, cerr)
+				grpclog.Errorf("Failed to close conn to %s: %v", endpoint, cerr)
 			}
 			return
 		}
 		go func() {
 			<-ctx.Done()
 			if cerr := conn.Close(); cerr != nil {
-				grpclog.Infof("Failed to close conn to %s: %v", endpoint, cerr)
+				grpclog.Errorf("Failed to close conn to %s: %v", endpoint, cerr)
 			}
 		}()
 	}()
@@ -186,7 +230,7 @@ func RegisterProfileStoreServiceHandler(ctx context.Context, mux *runtime.ServeM
 // to "mux". The handlers forward requests to the grpc endpoint over the given implementation of "ProfileStoreServiceClient".
 // Note: the gRPC framework executes interceptors within the gRPC handler. If the passed in "ProfileStoreServiceClient"
 // doesn't go through the normal gRPC flow (creating a gRPC client etc.) then it will be up to the passed in
-// "ProfileStoreServiceClient" to call the correct interceptors.
+// "ProfileStoreServiceClient" to call the correct interceptors. This client ignores the HTTP middlewares.
 func RegisterProfileStoreServiceHandlerClient(ctx context.Context, mux *runtime.ServeMux, client ProfileStoreServiceClient) error {
 
 	mux.Handle("POST", pattern_ProfileStoreService_WriteRaw_0, func(w http.ResponseWriter, req *http.Request, pathParams map[string]string) {
@@ -211,35 +255,61 @@ func RegisterProfileStoreServiceHandlerClient(ctx context.Context, mux *runtime.
 
 	})
 
+	mux.Handle("POST", pattern_ProfileStoreService_Write_0, func(w http.ResponseWriter, req *http.Request, pathParams map[string]string) {
+		ctx, cancel := context.WithCancel(req.Context())
+		defer cancel()
+		inboundMarshaler, outboundMarshaler := runtime.MarshalerForRequest(mux, req)
+		var err error
+		var annotatedContext context.Context
+		annotatedContext, err = runtime.AnnotateContext(ctx, mux, req, "/parca.profilestore.v1alpha1.ProfileStoreService/Write", runtime.WithHTTPPathPattern("/profiles/write"))
+		if err != nil {
+			runtime.HTTPError(ctx, mux, outboundMarshaler, w, req, err)
+			return
+		}
+		resp, md, err := request_ProfileStoreService_Write_0(annotatedContext, inboundMarshaler, client, req, pathParams)
+		annotatedContext = runtime.NewServerMetadataContext(annotatedContext, md)
+		if err != nil {
+			runtime.HTTPError(annotatedContext, mux, outboundMarshaler, w, req, err)
+			return
+		}
+
+		forward_ProfileStoreService_Write_0(annotatedContext, mux, outboundMarshaler, w, req, func() (proto.Message, error) { return resp.Recv() }, mux.GetForwardResponseOptions()...)
+
+	})
+
 	return nil
 }
 
 var (
 	pattern_ProfileStoreService_WriteRaw_0 = runtime.MustPattern(runtime.NewPattern(1, []int{2, 0, 2, 1}, []string{"profiles", "writeraw"}, ""))
+
+	pattern_ProfileStoreService_Write_0 = runtime.MustPattern(runtime.NewPattern(1, []int{2, 0, 2, 1}, []string{"profiles", "write"}, ""))
 )
 
 var (
 	forward_ProfileStoreService_WriteRaw_0 = runtime.ForwardResponseMessage
+
+	forward_ProfileStoreService_Write_0 = runtime.ForwardResponseStream
 )
 
 // RegisterAgentsServiceHandlerFromEndpoint is same as RegisterAgentsServiceHandler but
 // automatically dials to "endpoint" and closes the connection when "ctx" gets done.
 func RegisterAgentsServiceHandlerFromEndpoint(ctx context.Context, mux *runtime.ServeMux, endpoint string, opts []grpc.DialOption) (err error) {
-	conn, err := grpc.Dial(endpoint, opts...)
+	conn, err := grpc.NewClient(endpoint, opts...)
 	if err != nil {
 		return err
 	}
 	defer func() {
 		if err != nil {
 			if cerr := conn.Close(); cerr != nil {
-				grpclog.Infof("Failed to close conn to %s: %v", endpoint, cerr)
+				grpclog.Errorf("Failed to close conn to %s: %v", endpoint, cerr)
 			}
 			return
 		}
 		go func() {
 			<-ctx.Done()
 			if cerr := conn.Close(); cerr != nil {
-				grpclog.Infof("Failed to close conn to %s: %v", endpoint, cerr)
+				grpclog.Errorf("Failed to close conn to %s: %v", endpoint, cerr)
 			}
 		}()
 	}()
@@ -257,7 +327,7 @@ func RegisterAgentsServiceHandler(ctx context.Context, mux *runtime.ServeMux, co
 // to "mux". The handlers forward requests to the grpc endpoint over the given implementation of "AgentsServiceClient".
 // Note: the gRPC framework executes interceptors within the gRPC handler. If the passed in "AgentsServiceClient"
 // doesn't go through the normal gRPC flow (creating a gRPC client etc.) then it will be up to the passed in
-// "AgentsServiceClient" to call the correct interceptors.
+// "AgentsServiceClient" to call the correct interceptors. This client ignores the HTTP middlewares.
 func RegisterAgentsServiceHandlerClient(ctx context.Context, mux *runtime.ServeMux, client AgentsServiceClient) error {
 
 	mux.Handle("GET", pattern_AgentsService_Agents_0, func(w http.ResponseWriter, req *http.Request, pathParams map[string]string) {

@@ -1,4 +1,4 @@
-// Copyright 2022 The Parca Authors
+// Copyright 2022-2025 The Parca Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -20,20 +20,19 @@ import (
 	"time"
 
 	"github.com/go-kit/log"
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 	"github.com/thanos-io/objstore/client"
 	"github.com/thanos-io/objstore/providers/filesystem"
-	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 	"google.golang.org/protobuf/types/known/timestamppb"
-	"gopkg.in/yaml.v2"
+	"gopkg.in/yaml.v3"
 
 	debuginfopb "github.com/parca-dev/parca/gen/proto/go/parca/debuginfo/v1alpha1"
 )
 
 func TestMetadata(t *testing.T) {
 	ctx := context.Background()
-	tracer := trace.NewNoopTracerProvider().Tracer("")
+	tracer := noop.NewTracerProvider().Tracer("")
 
 	dir, err := os.MkdirTemp("", "parca-test")
 	require.NoError(t, err)
@@ -52,7 +51,7 @@ func TestMetadata(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	bucket, err := client.NewBucket(logger, cfg, prometheus.NewRegistry(), "parca/store")
+	bucket, err := client.NewBucket(logger, cfg, "parca/store")
 	require.NoError(t, err)
 
 	store, err := NewStore(
@@ -60,7 +59,7 @@ func TestMetadata(t *testing.T) {
 		logger,
 		NewObjectStoreMetadata(logger, bucket),
 		bucket,
-		NopDebuginfodClient{},
+		NopDebuginfodClients{},
 		SignedUpload{
 			Enabled: false,
 		},
@@ -70,15 +69,15 @@ func TestMetadata(t *testing.T) {
 	require.NoError(t, err)
 
 	// Test that the initial state should be empty.
-	_, err = store.metadata.Fetch(ctx, "fake-build-id")
+	_, err = store.metadata.Fetch(ctx, "fake-build-id", debuginfopb.DebuginfoType_DEBUGINFO_TYPE_DEBUGINFO_UNSPECIFIED)
 	require.ErrorIs(t, err, ErrMetadataNotFound)
 
 	// Updating the state should be written to blob storage.
 	time := time.Now()
-	err = store.metadata.MarkAsUploading(ctx, "fake-build-id", "fake-upload-id", "fake-hash", timestamppb.New(time))
+	err = store.metadata.MarkAsUploading(ctx, "fake-build-id", "fake-upload-id", "fake-hash", debuginfopb.DebuginfoType_DEBUGINFO_TYPE_DEBUGINFO_UNSPECIFIED, timestamppb.New(time))
 	require.NoError(t, err)
 
-	dbginfo, err := store.metadata.Fetch(ctx, "fake-build-id")
+	dbginfo, err := store.metadata.Fetch(ctx, "fake-build-id", debuginfopb.DebuginfoType_DEBUGINFO_TYPE_DEBUGINFO_UNSPECIFIED)
 	require.NoError(t, err)
 	require.Equal(t, "fake-build-id", dbginfo.BuildId)
 	require.Equal(t, "fake-upload-id", dbginfo.Upload.Id)

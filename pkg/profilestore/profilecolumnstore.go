@@ -1,4 +1,4 @@
-// Copyright 2022 The Parca Authors
+// Copyright 2022-2025 The Parca Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -16,21 +16,27 @@ package profilestore
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/apache/arrow/go/v17/arrow/ipc"
+	"github.com/apache/arrow/go/v17/arrow/memory"
 	"github.com/go-kit/log"
-	"github.com/polarsignals/frostdb"
+	"github.com/gogo/status"
 	"github.com/polarsignals/frostdb/dynparquet"
+	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel/trace"
+	otelgrpcprofilingpb "go.opentelemetry.io/proto/otlp/collector/profiles/v1experimental"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	metastorepb "github.com/parca-dev/parca/gen/proto/go/parca/metastore/v1alpha1"
 	profilestorepb "github.com/parca-dev/parca/gen/proto/go/parca/profilestore/v1alpha1"
-	"github.com/parca-dev/parca/pkg/parcacol"
+	"github.com/parca-dev/parca/pkg/ingester"
+	"github.com/parca-dev/parca/pkg/normalizer"
 )
 
 type agent struct {
@@ -44,52 +50,66 @@ type ProfileColumnStore struct {
 	profilestorepb.UnimplementedProfileStoreServiceServer
 	profilestorepb.UnimplementedAgentsServiceServer
 
-	logger    log.Logger
-	tracer    trace.Tracer
-	metastore metastorepb.MetastoreServiceClient
+	otelgrpcprofilingpb.UnimplementedProfilesServiceServer
 
-	table  *frostdb.Table
-	schema *dynparquet.Schema
+	logger log.Logger
+	tracer trace.Tracer
+
+	ingester ingester.Ingester
 
 	mtx sync.Mutex
 	// ip as the key
 	agents map[string]agent
 
-	bufferPool *sync.Pool
+	mem    memory.Allocator
+	schema *dynparquet.Schema
+
+	converterMetrics *normalizer.Metrics
 }
 
 var _ profilestorepb.ProfileStoreServiceServer = &ProfileColumnStore{}
 
 func NewProfileColumnStore(
+	reg prometheus.Registerer,
 	logger log.Logger,
 	tracer trace.Tracer,
-	metastore metastorepb.MetastoreServiceClient,
-	table *frostdb.Table,
+	ingester ingester.Ingester,
 	schema *dynparquet.Schema,
+	mem memory.Allocator,
 ) *ProfileColumnStore {
+	normalizerMetrics := normalizer.NewMetrics(reg)
 	return &ProfileColumnStore{
-		logger:    logger,
-		tracer:    tracer,
-		metastore: metastore,
-		table:     table,
-		schema:    schema,
-		agents:    make(map[string]agent),
-		bufferPool: &sync.Pool{
-			New: func() any {
-				return new(bytes.Buffer)
-			},
-		},
+		logger:   logger,
+		tracer:   tracer,
+		ingester: ingester,
+		schema:   schema,
+		mem:      mem,
+		agents:   make(map[string]agent),
+
+		converterMetrics: normalizerMetrics,
 	}
 }
 
 func (s *ProfileColumnStore) writeSeries(ctx context.Context, req *profilestorepb.WriteRawRequest) error {
-	return parcacol.NewIngester(
-		s.logger,
-		s.table,
+	r, err := normalizer.WriteRawRequestToArrowRecord(
+		ctx,
+		s.mem,
+		req,
 		s.schema,
-		s.metastore,
-		s.bufferPool,
-	).Ingest(ctx, req)
+	)
+	if err != nil {
+		return err
+	}
+	if r == nil {
+		return nil
+	}
+	defer r.Release()
+
+	if r.NumRows() == 0 {
+		return nil
+	}
+
+	return s.ingester.Ingest(ctx, r)
 }
 
 func (s *ProfileColumnStore) updateAgents(nodeNameAndIP string, ag agent) {
@@ -126,9 +146,6 @@ found:
 }
 
 func (s *ProfileColumnStore) WriteRaw(ctx context.Context, req *profilestorepb.WriteRawRequest) (*profilestorepb.WriteRawResponse, error) {
-	ctx, span := s.tracer.Start(ctx, "write-raw")
-	defer span.End()
-
 	start := time.Now()
 	writeErr := s.writeSeries(ctx, req)
 
@@ -152,6 +169,153 @@ func (s *ProfileColumnStore) WriteRaw(ctx context.Context, req *profilestorepb.W
 	}
 
 	return &profilestorepb.WriteRawResponse{}, nil
+}
+
+func (s *ProfileColumnStore) Write(server profilestorepb.ProfileStoreService_WriteServer) error {
+	ctx, cancel := context.WithTimeout(server.Context(), 5*time.Second)
+	defer cancel()
+
+	errChan := make(chan error, 1)
+	go func() {
+		errChan <- s.write(ctx, server)
+		close(errChan)
+	}()
+
+	select {
+	case <-ctx.Done():
+		return status.Error(codes.DeadlineExceeded, "deadline exceeded")
+	case err := <-errChan:
+		return err
+	}
+}
+
+func (s *ProfileColumnStore) write(ctx context.Context, server profilestorepb.ProfileStoreService_WriteServer) error {
+	req, err := server.Recv()
+	if err != nil {
+		return status.Errorf(codes.InvalidArgument, "failed to receive request: %v", err)
+	}
+
+	r, err := ipc.NewReader(bytes.NewReader(req.Record))
+	if err != nil {
+		return status.Errorf(codes.InvalidArgument, "failed to create reader: %v", err)
+	}
+	defer r.Release()
+
+	if !r.Next() {
+		return status.Error(codes.InvalidArgument, "no record found")
+	}
+
+	if r.Err() != nil {
+		return status.Errorf(codes.InvalidArgument, "failed to read record: %v", r.Err())
+	}
+
+	c := normalizer.NewArrowToInternalConverter(
+		s.mem,
+		s.schema,
+		s.converterMetrics,
+	)
+	defer c.Release()
+
+	if err := c.AddSampleRecord(ctx, r.Record()); err != nil {
+		return status.Error(codes.InvalidArgument, "failed to add sample record")
+	}
+
+	hasUnknownStacktraceIDs, err := c.HasUnknownStacktraceIDs()
+	if err != nil {
+		return status.Errorf(codes.Internal, "failed to check unknown stacktrace IDs: %v", err)
+	}
+	if hasUnknownStacktraceIDs {
+		rec, err := c.UnknownStacktraceIDsRecord()
+		if err != nil {
+			return status.Errorf(codes.Internal, "failed to get unknown stacktrace IDs record: %v", err)
+		}
+
+		buf := bytes.NewBuffer(nil)
+		w := ipc.NewWriter(buf,
+			ipc.WithSchema(rec.Schema()),
+			ipc.WithAllocator(s.mem),
+		)
+		if err := w.Write(rec); err != nil {
+			return status.Errorf(codes.Internal, "failed to write unknown stacktrace IDs record: %v", err)
+		}
+
+		if err := w.Close(); err != nil {
+			return status.Errorf(codes.Internal, "failed to close writer")
+		}
+
+		if err := server.Send(&profilestorepb.WriteResponse{
+			Record: buf.Bytes(),
+		}); err != nil {
+			return status.Errorf(codes.Internal, "failed to send unknown stacktrace IDs record")
+		}
+
+		req, err = server.Recv()
+		if err != nil {
+			return status.Errorf(codes.InvalidArgument, "failed to receive request: %v", err)
+		}
+
+		r, err = ipc.NewReader(bytes.NewReader(req.Record))
+		if err != nil {
+			return status.Errorf(codes.InvalidArgument, "failed to create reader: %v", err)
+		}
+
+		if !r.Next() {
+			return status.Error(codes.InvalidArgument, "no record found")
+		}
+
+		if r.Err() != nil {
+			return status.Errorf(codes.InvalidArgument, "failed to read record: %v", r.Err())
+		}
+
+		if err := c.AddLocationsRecord(ctx, r.Record()); err != nil {
+			return status.Errorf(codes.InvalidArgument, "failed to add locations record: %v", err)
+		}
+	}
+
+	if err := c.Validate(); err != nil {
+		return status.Errorf(codes.InvalidArgument, "validate record reader: %v", err)
+	}
+
+	ir, err := c.NewRecord(ctx)
+	if err != nil {
+		return fmt.Errorf("new record: %w", err)
+	}
+
+	if ir.NumRows() == 0 {
+		return nil
+	}
+
+	if err := s.ingester.Ingest(ctx, ir); err != nil {
+		return status.Errorf(codes.Internal, "failed to ingest record: %v", err)
+	}
+
+	return nil
+}
+
+func (s *ProfileColumnStore) Export(ctx context.Context, req *otelgrpcprofilingpb.ExportProfilesServiceRequest) (*otelgrpcprofilingpb.ExportProfilesServiceResponse, error) {
+	r, err := normalizer.OtlpRequestToArrowRecord(
+		ctx,
+		req,
+		s.schema,
+		s.mem,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if r == nil {
+		return &otelgrpcprofilingpb.ExportProfilesServiceResponse{}, nil
+	}
+	defer r.Release()
+
+	if r.NumRows() == 0 {
+		return &otelgrpcprofilingpb.ExportProfilesServiceResponse{}, nil
+	}
+
+	if err := s.ingester.Ingest(ctx, r); err != nil {
+		return nil, err
+	}
+
+	return &otelgrpcprofilingpb.ExportProfilesServiceResponse{}, nil
 }
 
 func (s *ProfileColumnStore) Agents(ctx context.Context, req *profilestorepb.AgentsRequest) (*profilestorepb.AgentsResponse, error) {

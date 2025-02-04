@@ -1,4 +1,4 @@
-// Copyright 2022 The Parca Authors
+// Copyright 2022-2025 The Parca Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -18,73 +18,91 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io/fs"
+	"net/http"
 	"os"
 	"path/filepath"
 	goruntime "runtime"
+	"runtime/pprof"
 	"strings"
 	"syscall"
 	"time"
 
-	"github.com/apache/arrow/go/v8/arrow/memory"
-	"github.com/dgraph-io/badger/v3"
+	"github.com/apache/arrow/go/v17/arrow/memory"
+	"github.com/dgraph-io/badger/v4"
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
-	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
+	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-middleware/providers/prometheus"
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 	"github.com/oklog/run"
 	"github.com/polarsignals/frostdb"
+	"github.com/polarsignals/frostdb/dynparquet"
+	"github.com/polarsignals/frostdb/index"
 	"github.com/polarsignals/frostdb/query"
+	"github.com/polarsignals/frostdb/storage"
+	"github.com/polarsignals/iceberg-go"
+	"github.com/polarsignals/iceberg-go/catalog"
 	"github.com/prometheus/client_golang/prometheus"
+	promconfig "github.com/prometheus/common/config"
 	"github.com/prometheus/prometheus/discovery"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/thanos-io/objstore"
 	"github.com/thanos-io/objstore/client"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	objstoretracing "github.com/thanos-io/objstore/tracing/opentelemetry"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	tracing "go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/otel/propagation"
-	"go.opentelemetry.io/otel/sdk/resource"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	semconv "go.opentelemetry.io/otel/semconv/v1.4.0"
 	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
+	otelgrpcprofilingpb "go.opentelemetry.io/proto/otlp/collector/profiles/v1experimental"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
-	"gopkg.in/yaml.v2"
+	"gopkg.in/yaml.v3"
 
 	debuginfopb "github.com/parca-dev/parca/gen/proto/go/parca/debuginfo/v1alpha1"
-	metastorepb "github.com/parca-dev/parca/gen/proto/go/parca/metastore/v1alpha1"
 	profilestorepb "github.com/parca-dev/parca/gen/proto/go/parca/profilestore/v1alpha1"
 	querypb "github.com/parca-dev/parca/gen/proto/go/parca/query/v1alpha1"
 	scrapepb "github.com/parca-dev/parca/gen/proto/go/parca/scrape/v1alpha1"
 	sharepb "github.com/parca-dev/parca/gen/proto/go/parca/share/v1alpha1"
+	telemetry "github.com/parca-dev/parca/gen/proto/go/parca/telemetry/v1alpha1"
+	"github.com/parca-dev/parca/pkg/badgerlogger"
 	"github.com/parca-dev/parca/pkg/config"
 	"github.com/parca-dev/parca/pkg/debuginfo"
-	"github.com/parca-dev/parca/pkg/metastore"
+	"github.com/parca-dev/parca/pkg/ingester"
+	"github.com/parca-dev/parca/pkg/kv"
 	"github.com/parca-dev/parca/pkg/parcacol"
+	"github.com/parca-dev/parca/pkg/profile"
 	"github.com/parca-dev/parca/pkg/profilestore"
 	queryservice "github.com/parca-dev/parca/pkg/query"
 	"github.com/parca-dev/parca/pkg/scrape"
 	"github.com/parca-dev/parca/pkg/server"
-	"github.com/parca-dev/parca/pkg/signedupload"
-	"github.com/parca-dev/parca/pkg/symbol"
+	"github.com/parca-dev/parca/pkg/signedrequests"
 	"github.com/parca-dev/parca/pkg/symbolizer"
+	telemetryservice "github.com/parca-dev/parca/pkg/telemetry"
+	"github.com/parca-dev/parca/pkg/tracer"
+	"github.com/parca-dev/parca/ui"
 )
 
 const (
 	symbolizationInterval = 10 * time.Second
 	flagModeScraperOnly   = "scraper-only"
+	flagModeForwarder     = "forwarder"
 	metaStoreBadger       = "badger"
 )
 
 type Flags struct {
-	ConfigPath  string `default:"parca.yaml" help:"Path to config file."`
-	Mode        string `default:"all" enum:"all,scraper-only" help:"Scraper only runs a scraper that sends to a remote gRPC endpoint. All runs all components."`
-	LogLevel    string `default:"info" enum:"error,warn,info,debug" help:"log level."`
-	HTTPAddress string `default:":7070" help:"Address to bind HTTP server to."`
-	Port        string `default:"" help:"(DEPRECATED) Use http-address instead."`
+	ConfigPath       string        `default:"parca.yaml" help:"Path to config file."`
+	Mode             string        `default:"all" enum:"all,scraper-only,forwarder" help:"Scraper only runs a scraper that sends to a remote gRPC endpoint. All runs all components."`
+	HTTPAddress      string        `default:":7070" help:"Address to bind HTTP server to."`
+	HTTPReadTimeout  time.Duration `default:"5s" help:"Timeout duration for HTTP server to read request body."`
+	HTTPWriteTimeout time.Duration `default:"1m" help:"Timeout duration for HTTP server to write response body."`
+	Port             string        `default:"" help:"(DEPRECATED) Use http-address instead."`
+
+	Logs FlagsLogs `embed:"" prefix:"log-"`
+	OTLP FlagsOTLP `embed:"" prefix:"otlp-"`
 
 	CORSAllowedOrigins []string `help:"Allowed CORS origins."`
-	OTLPAddress        string   `help:"OpenTelemetry collector address to send traces to."`
 	Version            bool     `help:"Show application version."`
 	PathPrefix         string   `default:"" help:"Path prefix for the UI"`
 
@@ -93,26 +111,14 @@ type Flags struct {
 
 	EnablePersistence bool `default:"false" help:"Turn on persistent storage for the metastore and profile storage."`
 
-	StorageGranuleSize  int64  `default:"26265625" help:"Granule size in bytes for storage."`
-	StorageActiveMemory int64  `default:"536870912" help:"Amount of memory to use for active storage. Defaults to 512MB."`
-	StoragePath         string `default:"data" help:"Path to storage directory."`
-	StorageEnableWAL    bool   `default:"false" help:"Enables write ahead log for profile storage."`
-	StorageRowGroupSize int    `default:"8192" help:"Number of rows in each row group during compaction and persistence. Setting to <= 0 results in a single row group per file."`
+	Storage FlagsStorage `embed:"" prefix:"storage-"`
 
-	SymbolizerDemangleMode  string `default:"simple" help:"Mode to demangle C++ symbols. Default mode is simplified: no parameters, no templates, no return type" enum:"simple,full,none,templates"`
-	SymbolizerNumberOfTries int    `default:"3" help:"Number of tries to attempt to symbolize an unsybolized location"`
+	Symbolizer FlagsSymbolizer `embed:"" prefix:"symbolizer-"`
 
-	Metastore string `default:"badger" help:"Which metastore implementation to use" enum:"badger"`
+	Debuginfo  FlagsDebuginfo  `embed:"" prefix:"debuginfo-"`
+	Debuginfod FlagsDebuginfod `embed:"" prefix:"debuginfod-"`
 
 	ProfileShareServer string `default:"api.pprof.me:443" help:"gRPC address to send share profile requests to."`
-
-	DebugInfodUpstreamServers    []string      `default:"https://debuginfod.elfutils.org" help:"Upstream debuginfod servers. Defaults to https://debuginfod.elfutils.org. It is an ordered list of servers to try. Learn more at https://sourceware.org/elfutils/Debuginfod.html"`
-	DebugInfodHTTPRequestTimeout time.Duration `default:"5m" help:"Timeout duration for HTTP request to upstream debuginfod server. Defaults to 5m"`
-	DebuginfoCacheDir            string        `default:"/tmp" help:"Path to directory where debuginfo is cached."`
-	DebuginfoUploadMaxSize       int64         `default:"1000000000" help:"Maximum size of debuginfo upload in bytes."`
-	DebuginfoUploadMaxDuration   time.Duration `default:"15m" help:"Maximum duration of debuginfo upload."`
-
-	DebuginfoUploadsSignedURL bool `default:"false" help:"Whether to use signed URLs for debuginfo uploads."`
 
 	StoreAddress       string            `kong:"help='gRPC address to send profiles and symbols to.'"`
 	BearerToken        string            `kong:"help='Bearer token to authenticate with store.'"`
@@ -120,6 +126,57 @@ type Flags struct {
 	Insecure           bool              `kong:"help='Send gRPC requests via plaintext instead of TLS.'"`
 	InsecureSkipVerify bool              `kong:"help='Skip TLS certificate verification.'"`
 	ExternalLabel      map[string]string `kong:"help='Label(s) to attach to all profiles in scraper-only mode.'"`
+
+	Hidden FlagsHidden `embed:"" prefix:""`
+}
+
+type FlagsLogs struct {
+	Level  string `enum:"error,warn,info,debug" default:"info" help:"Log level."`
+	Format string `enum:"logfmt,json" default:"logfmt" help:"Configure if structured logging as JSON or as logfmt"`
+}
+
+// FlagsOTLP provides OTLP configuration flags.
+type FlagsOTLP struct {
+	Address  string `help:"The endpoint to send OTLP traces to."`
+	Exporter string `default:"grpc"                              enum:"grpc,http,stdout" help:"The OTLP exporter to use."`
+	Insecure bool   `default:"true" help:"If true, disables TLS for OTLP exporters (both gRPC and HTTP)."`
+}
+
+type FlagsStorage struct {
+	ActiveMemory        int64  `default:"536870912" help:"Amount of memory to use for active storage. Defaults to 512MB."`
+	Path                string `default:"data" help:"Path to storage directory."`
+	EnableWAL           bool   `default:"false" help:"Enables write ahead log for profile storage."`
+	SnapshotTriggerSize int64  `default:"134217728" help:"Number of bytes to trigger a snapshot. Defaults to 1/4 of active memory. This is only used if enable-wal is set."`
+	RowGroupSize        int    `default:"8192" help:"Number of rows in each row group during compaction and persistence. Setting to <= 0 results in a single row group per file."`
+	IndexOnDisk         bool   `default:"false" help:"Whether to store the index on disk instead of in memory. Useful to reduce the memory footprint of the store."`
+}
+
+type FlagsSymbolizer struct {
+	DemangleMode          string `default:"simple" help:"Mode to demangle C++ symbols. Default mode is simplified: no parameters, no templates, no return type" enum:"simple,full,none,templates"`
+	ExternalAddr2linePath string `default:"" help:"Path to addr2line utility, to be used for symbolization instead of native implementation"`
+	NumberOfTries         int    `default:"3" help:"Number of tries to attempt to symbolize an unsybolized location"`
+}
+
+// FlagsDebuginfo configures the Parca Debuginfo client.
+type FlagsDebuginfo struct {
+	CacheDir          string        `default:"/tmp" help:"Path to directory where debuginfo is cached."`
+	UploadMaxSize     int64         `default:"1000000000" help:"Maximum size of debuginfo upload in bytes."`
+	UploadMaxDuration time.Duration `default:"15m" help:"Maximum duration of debuginfo upload."`
+	UploadsSignedURL  bool          `default:"false" help:"Whether to use signed URLs for debuginfo uploads."`
+}
+
+// FlagsDebuginfod configures the Parca Debuginfo daemon / server.
+type FlagsDebuginfod struct {
+	UpstreamServers    []string      `default:"debuginfod.elfutils.org" help:"Upstream debuginfod servers. Defaults to debuginfod.elfutils.org. It is an ordered list of servers to try. Learn more at https://sourceware.org/elfutils/Debuginfod.html"`
+	HTTPRequestTimeout time.Duration `default:"5m" help:"Timeout duration for HTTP request to upstream debuginfod server. Defaults to 5m"`
+}
+
+// FlagsHidden contains hidden flags intended only for debugging or experimental features.
+type FlagsHidden struct {
+	DebugNormalizeAddresses bool `kong:"help='Normalize sampled addresses.',default='true',hidden=''"`
+
+	// IcebergStorage is a experimental feature that enables Apache Iceberg storage for profile storage. This can be used with the enable-persistence flag.
+	IcebergStorage bool `kong:"help='Use iceberg storage for profile storage. Requires enable-persistence flag.',default='false',hidden=''"`
 }
 
 // Run the parca server.
@@ -127,16 +184,25 @@ func Run(ctx context.Context, logger log.Logger, reg *prometheus.Registry, flags
 	goruntime.SetBlockProfileRate(flags.BlockProfileRate)
 	goruntime.SetMutexProfileFraction(flags.MutexProfileFraction)
 
-	tracerProvider := trace.NewNoopTracerProvider()
-	if flags.OTLPAddress != "" {
-		var closer func()
+	// Initialize tracing.
+	var (
+		exporter       tracer.Exporter
+		tracerProvider trace.TracerProvider
+	)
+	tracerProvider = noop.NewTracerProvider()
+
+	if flags.OTLP.Address != "" {
 		var err error
-		tracerProvider, closer, err = initTracer(logger, flags.OTLPAddress)
+
+		exporter, err = tracer.NewExporter(flags.OTLP.Exporter, flags.OTLP.Address, flags.OTLP.Insecure)
 		if err != nil {
-			level.Error(logger).Log("msg", "failed to initialize tracing", "err", err)
-			return err
+			level.Error(logger).Log("msg", "failed to create tracing exporter", "err", err)
 		}
-		defer closer()
+		// NewExporter always returns a non-nil exporter and non-nil error.
+		tracerProvider, err = tracer.NewProvider(ctx, version, exporter)
+		if err != nil {
+			level.Error(logger).Log("msg", "failed to create tracing provider", "err", err)
+		}
 	}
 
 	if flags.Port != "" {
@@ -155,12 +221,18 @@ func Run(ctx context.Context, logger log.Logger, reg *prometheus.Registry, flags
 		return err
 	}
 
+	// Strip the subpath
+	uiFS, err := fs.Sub(ui.FS, "packages/app/web/build")
+	if err != nil {
+		return fmt.Errorf("failed to initialize UI filesystem: %w", err)
+	}
+
 	if flags.StoreAddress != "" && flags.Mode != flagModeScraperOnly {
 		return fmt.Errorf("the mode should be set as `--mode=scraper-only`, if `StoreAddress` is set")
 	}
 
-	if flags.Mode == flagModeScraperOnly {
-		return runScraper(ctx, logger, reg, tracerProvider, flags, version, cfg)
+	if flags.Mode == flagModeScraperOnly || flags.Mode == flagModeForwarder {
+		return runForwarder(ctx, logger, reg, tracerProvider, uiFS, flags, version, cfg)
 	}
 
 	bucketCfg, err := yaml.Marshal(cfg.ObjectStorage.Bucket)
@@ -169,84 +241,106 @@ func Run(ctx context.Context, logger log.Logger, reg *prometheus.Registry, flags
 		return err
 	}
 
-	bucket, err := client.NewBucket(logger, bucketCfg, reg, "parca")
+	bucket, err := client.NewBucket(logger, bucketCfg, "parca")
 	if err != nil {
 		level.Error(logger).Log("msg", "failed to initialize object storage bucket", "err", err)
 		return err
 	}
+	bucket = objstore.WrapWithMetrics(bucket, reg, bucket.Name())
+	bucket = objstoretracing.WrapWithTraces(bucket, tracerProvider.Tracer("objstore_bucket"))
 
-	var signedUploadClient signedupload.Client
-	if flags.DebuginfoUploadsSignedURL {
+	var signedRequestsClient signedrequests.Client
+	if flags.Debuginfo.UploadsSignedURL {
 		var err error
-		signedUploadClient, err = signedupload.NewClient(
+		signedRequestsClient, err = signedrequests.NewClient(
 			context.Background(),
 			cfg.ObjectStorage.Bucket,
 		)
-
 		if err != nil {
 			level.Error(logger).Log("msg", "failed to initialize signed upload client", "err", err)
 			return err
 		}
 
-		defer signedUploadClient.Close()
+		defer signedRequestsClient.Close()
 	}
 
-	var mStr metastorepb.MetastoreServiceServer
-	switch flags.Metastore {
-	case metaStoreBadger:
-		var badgerOptions badger.Options
-		switch flags.EnablePersistence {
-		case true:
-			badgerOptions = badger.DefaultOptions(filepath.Join(flags.StoragePath, "metastore"))
-		default:
-			badgerOptions = badger.DefaultOptions("").WithInMemory(true)
-		}
-
-		badgerOptions = badgerOptions.WithLogger(&metastore.BadgerLogger{Logger: logger})
-		db, err := badger.Open(badgerOptions)
-		if err != nil {
-			level.Error(logger).Log("msg", "failed to open badger database for metastore", "err", err)
-			return err
-		}
-
-		mStr = metastore.NewBadgerMetastore(
-			logger,
-			reg,
-			tracerProvider.Tracer(metaStoreBadger),
-			db,
-		)
+	var badgerOptions badger.Options
+	switch flags.EnablePersistence {
+	case true:
+		badgerOptions = badger.DefaultOptions(filepath.Join(flags.Storage.Path, "metastore"))
 	default:
-		err := fmt.Errorf("unknown metastore implementation: %s", flags.Metastore)
-		level.Error(logger).Log("msg", "failed to initialize metastore", "err", err)
+		badgerOptions = badger.DefaultOptions("").WithInMemory(true)
+	}
+
+	badgerOptions = badgerOptions.WithLogger(&badgerlogger.BadgerLogger{Logger: logger})
+	db, err := badger.Open(badgerOptions)
+	if err != nil {
+		level.Error(logger).Log("msg", "failed to open badger database for metastore", "err", err)
 		return err
 	}
 
-	metastore := metastore.NewInProcessClient(mStr)
-
 	frostdbOptions := []frostdb.Option{
-		frostdb.WithActiveMemorySize(flags.StorageActiveMemory),
+		frostdb.WithActiveMemorySize(flags.Storage.ActiveMemory),
 		frostdb.WithLogger(logger),
 		frostdb.WithRegistry(reg),
 		frostdb.WithTracer(tracerProvider.Tracer("frostdb")),
-		frostdb.WithGranuleSizeBytes(flags.StorageGranuleSize),
 	}
 
 	if flags.EnablePersistence {
-		frostdbOptions = append(frostdbOptions, frostdb.WithBucketStorage(objstore.NewPrefixedBucket(bucket, "blocks")))
+		blocksDirectory := "blocks"
+		prefixedBucket := objstore.NewPrefixedBucket(bucket, blocksDirectory)
+		var store frostdb.DataSinkSource
+		if flags.Hidden.IcebergStorage { // Experimental Iceberg storage.
+			// Optain the bucket URI from the config
+			uri, err := BucketURIFromConfig(bucketCfg)
+			if err != nil {
+				level.Error(logger).Log("msg", "failed to get bucket URI from config", "err", err)
+				return err
+			}
+			path := filepath.Join(uri, blocksDirectory)
+			store, err = storage.NewIceberg(path, catalog.NewHDFS(path, prefixedBucket), prefixedBucket,
+				storage.WithIcebergPartitionSpec(
+					iceberg.NewPartitionSpec( // Partition the table by timestamp.
+						iceberg.PartitionField{
+							Name:      profile.ColumnTimestamp,
+							Transform: iceberg.IdentityTransform{},
+						},
+					),
+				))
+			if err != nil {
+				level.Error(logger).Log("msg", "failed to initialize iceberg", "err", err)
+				return err
+			}
+		} else {
+			store = frostdb.NewDefaultObjstoreBucket(prefixedBucket)
+		}
+		frostdbOptions = append(
+			frostdbOptions,
+			frostdb.WithReadWriteStorage(store),
+		)
 	}
 
-	if flags.StorageEnableWAL {
-		frostdbOptions = append(frostdbOptions, frostdb.WithWAL(), frostdb.WithStoragePath(flags.StoragePath))
+	if flags.Storage.EnableWAL {
+		frostdbOptions = append(
+			frostdbOptions,
+			frostdb.WithWAL(),
+			frostdb.WithStoragePath(flags.Storage.Path),
+			frostdb.WithSnapshotTriggerSize(flags.Storage.SnapshotTriggerSize),
+		)
+
+		if flags.Storage.IndexOnDisk {
+			frostdbOptions = append(frostdbOptions, frostdb.WithIndexConfig(
+				[]*index.LevelConfig{
+					{Level: index.L0, MaxSize: 1024 * 1024 * 15, Type: index.CompactionTypeParquetDisk},
+					{Level: index.L1, MaxSize: 1024 * 1024 * 128, Type: index.CompactionTypeParquetDisk},
+					{Level: index.L2, MaxSize: 1024 * 1024 * 512},
+				}))
+		}
 	}
 
 	col, err := frostdb.New(frostdbOptions...)
 	if err != nil {
 		level.Error(logger).Log("msg", "failed to initialize storage", "err", err)
-		return err
-	}
-
-	if err := col.ReplayWALs(context.Background()); err != nil {
-		level.Error(logger).Log("msg", "failed to replay WAL", "err", err)
 		return err
 	}
 
@@ -256,54 +350,130 @@ func Run(ctx context.Context, logger log.Logger, reg *prometheus.Registry, flags
 		return err
 	}
 
-	schema, err := parcacol.Schema()
-	if err != nil {
-		level.Error(logger).Log("msg", "failed to get schema", "err", err)
-		return err
-	}
-
+	def := profile.SchemaDefinition()
 	table, err := colDB.Table("stacktraces",
 		frostdb.NewTableConfig(
-			schema,
-			frostdb.WithRowGroupSize(flags.StorageRowGroupSize),
+			def,
+			frostdb.WithRowGroupSize(flags.Storage.RowGroupSize),
 		),
 	)
 	if err != nil {
 		level.Error(logger).Log("msg", "create table", "err", err)
 		return err
 	}
+	schema, err := dynparquet.SchemaFromDefinition(def)
+	if err != nil {
+		level.Error(logger).Log("msg", "schema from definition", "err", err)
+		return err
+	}
+
+	var debuginfodClients debuginfo.DebuginfodClients = debuginfo.NopDebuginfodClients{}
+	if len(flags.Debuginfod.UpstreamServers) > 0 {
+		debuginfodClients = debuginfo.NewDebuginfodClients(
+			logger,
+			reg,
+			tracerProvider,
+			flags.Debuginfod.UpstreamServers,
+			promconfig.NewUserAgentRoundTripper(fmt.Sprintf("parca.dev/debuginfod-client/%s", version), http.DefaultTransport),
+			flags.Debuginfod.HTTPRequestTimeout,
+			objstore.NewPrefixedBucket(bucket, "debuginfod-cache"),
+		)
+	}
+
+	debuginfoBucket := objstore.NewPrefixedBucket(bucket, "debuginfo")
+	prefixedSignedRequestsClient := signedrequests.NewPrefixedClient(signedRequestsClient, "debuginfo")
+	debuginfoMetadata := debuginfo.NewObjectStoreMetadata(logger, debuginfoBucket)
+	dbginfo, err := debuginfo.NewStore(
+		tracerProvider.Tracer("debuginfo"),
+		logger,
+		debuginfoMetadata,
+		debuginfoBucket,
+		debuginfodClients,
+		debuginfo.SignedUpload{
+			Enabled: flags.Debuginfo.UploadsSignedURL,
+			Client:  prefixedSignedRequestsClient,
+		},
+		flags.Debuginfo.UploadMaxDuration,
+		flags.Debuginfo.UploadMaxSize,
+	)
+	if err != nil {
+		level.Error(logger).Log("msg", "failed to initialize debug info store", "err", err)
+		return err
+	}
+
+	ingester := ingester.NewIngester(logger, table)
+	querier := parcacol.NewQuerier(
+		logger,
+		tracerProvider.Tracer("querier"),
+		query.NewEngine(
+			memory.DefaultAllocator,
+			colDB.TableProvider(),
+			query.WithTracer(tracerProvider.Tracer("query-engine")),
+		),
+		"stacktraces",
+		symbolizer.New(
+			logger,
+			debuginfoMetadata,
+			symbolizer.NewBadgerCache(db),
+			debuginfo.NewFetcher(debuginfodClients, debuginfoBucket),
+			flags.Debuginfo.CacheDir,
+			flags.Symbolizer.ExternalAddr2linePath,
+			symbolizer.WithDemangleMode(flags.Symbolizer.DemangleMode),
+		),
+		memory.DefaultAllocator,
+	)
 
 	s := profilestore.NewProfileColumnStore(
+		reg,
 		logger,
 		tracerProvider.Tracer("profilestore"),
-		metastore,
-		table,
+		ingester,
 		schema,
+		memory.DefaultAllocator,
 	)
-	conn, err := grpc.Dial(flags.ProfileShareServer, grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{})))
+
+	propagators := propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{})
+	opts := []grpc.DialOption{
+		grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{})),
+		grpc.WithStatsHandler(otelgrpc.NewClientHandler(
+			otelgrpc.WithTracerProvider(tracerProvider),
+			otelgrpc.WithPropagators(propagators),
+		)),
+	}
+	conn, err := grpc.NewClient(flags.ProfileShareServer, opts...)
 	if err != nil {
 		return fmt.Errorf("failed to create gRPC connection to ProfileShareServer: %s, %w", flags.ProfileShareServer, err)
 	}
+
 	q := queryservice.NewColumnQueryAPI(
 		logger,
 		tracerProvider.Tracer("query-service"),
 		sharepb.NewShareServiceClient(conn),
-		parcacol.NewQuerier(
-			logger,
-			tracerProvider.Tracer("querier"),
-			query.NewEngine(
-				memory.DefaultAllocator,
-				colDB.TableProvider(),
-				query.WithTracer(tracerProvider.Tracer("query-engine")),
-			),
-			"stacktraces",
-			metastore,
+		querier,
+		memory.DefaultAllocator,
+		parcacol.NewArrowToProfileConverter(
+			tracerProvider.Tracer("arrow_to_profile_converter"),
+			kv.NewKeyMaker(),
+		),
+		queryservice.NewBucketSourceFinder(
+			debuginfoBucket,
+			debuginfodClients,
 		),
 	)
 
+	t := telemetryservice.NewTelemetry(
+		logger,
+	)
+
+	sdMetrics, err := discovery.CreateAndRegisterSDMetrics(reg)
+	if err != nil {
+		level.Error(logger).Log("msg", "failed to register service discovery metrics", "err", err)
+		return err
+	}
+
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	discoveryManager := discovery.NewManager(ctx, logger)
+	discoveryManager := discovery.NewManager(ctx, logger, reg, sdMetrics)
 	if err := discoveryManager.ApplyConfig(getDiscoveryConfigs(cfg.ScrapeConfigs)); err != nil {
 		level.Error(logger).Log("msg", "failed to apply discovery configs", "err", err)
 		return err
@@ -312,56 +482,6 @@ func Run(ctx context.Context, logger log.Logger, reg *prometheus.Registry, flags
 	m := scrape.NewManager(logger, reg, s, cfg.ScrapeConfigs, labels.Labels{})
 	if err := m.ApplyConfig(cfg.ScrapeConfigs); err != nil {
 		level.Error(logger).Log("msg", "failed to apply scrape configs", "err", err)
-		return err
-	}
-
-	sym, err := symbol.NewSymbolizer(logger,
-		symbol.WithDemangleMode(flags.SymbolizerDemangleMode),
-		symbol.WithAttemptThreshold(flags.SymbolizerNumberOfTries),
-		symbol.WithCacheItemTTL(symbolizationInterval*3),
-	)
-	if err != nil {
-		level.Error(logger).Log("msg", "failed to initialize symbolizer", "err", err)
-		return err
-	}
-
-	var debuginfodClient debuginfo.DebuginfodClient = debuginfo.NopDebuginfodClient{}
-	if len(flags.DebugInfodUpstreamServers) > 0 {
-		httpDebugInfoClient, err := debuginfo.NewHTTPDebuginfodClient(logger, flags.DebugInfodUpstreamServers, flags.DebugInfodHTTPRequestTimeout)
-		if err != nil {
-			level.Error(logger).Log("msg", "failed to initialize debuginfod http client", "err", err)
-			return err
-		}
-
-		debuginfodClient, err = debuginfo.NewDebuginfodClientWithObjectStorageCache(
-			logger,
-			objstore.NewPrefixedBucket(bucket, "debuginfod-cache"),
-			httpDebugInfoClient,
-		)
-		if err != nil {
-			level.Error(logger).Log("msg", "failed to initialize debuginfod client cache", "err", err)
-			return err
-		}
-	}
-
-	debuginfoBucket := objstore.NewPrefixedBucket(bucket, "debuginfo")
-	prefixedSignedUploadClient := signedupload.NewPrefixedClient(signedUploadClient, "debuginfo")
-	debuginfoMetadata := debuginfo.NewObjectStoreMetadata(logger, debuginfoBucket)
-	dbginfo, err := debuginfo.NewStore(
-		tracerProvider.Tracer("debuginfo"),
-		logger,
-		debuginfoMetadata,
-		debuginfoBucket,
-		debuginfodClient,
-		debuginfo.SignedUpload{
-			Enabled: flags.DebuginfoUploadsSignedURL,
-			Client:  prefixedSignedUploadClient,
-		},
-		flags.DebuginfoUploadMaxDuration,
-		flags.DebuginfoUploadMaxSize,
-	)
-	if err != nil {
-		level.Error(logger).Log("msg", "failed to initialize debug info store", "err", err)
 		return err
 	}
 
@@ -388,31 +508,39 @@ func Run(ctx context.Context, logger log.Logger, reg *prometheus.Registry, flags
 
 	var gr run.Group
 	gr.Add(run.SignalHandler(ctx, os.Interrupt, syscall.SIGINT, syscall.SIGTERM))
-	{
-		s := symbolizer.New(
-			logger,
-			reg,
-			debuginfoMetadata,
-			metastore,
-			debuginfo.NewFetcher(debuginfoMetadata, debuginfodClient, debuginfoBucket),
-			sym,
-			flags.DebuginfoCacheDir,
-			0,
-		)
+
+	// Run group of OTL exporter.
+	if exporter != nil {
+		logger := log.With(logger, "group", "otlp_exporter")
 		ctx, cancel := context.WithCancel(ctx)
-		gr.Add(
-			func() error {
-				return s.Run(ctx, symbolizationInterval)
-			},
-			func(_ error) {
-				level.Debug(logger).Log("msg", "symbolizer server shutting down")
-				cancel()
-				sym.Close()
-			})
+		gr.Add(func() error {
+			if err := exporter.Start(ctx); err != nil {
+				return fmt.Errorf("failed to start exporter: %w", err)
+			}
+			<-ctx.Done()
+			return nil
+		}, func(error) {
+			level.Debug(logger).Log("msg", "shutting down otlp exporter")
+			cancel()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+
+			if err := exporter.Shutdown(ctx); err != nil {
+				level.Error(logger).Log("msg", "failed to stop exporter", "err", err)
+			}
+		})
 	}
+
 	gr.Add(
 		func() error {
-			return discoveryManager.Run()
+			var err error
+
+			pprof.Do(ctx, pprof.Labels("parca_component", "discovery"), func(_ context.Context) {
+				err = discoveryManager.Run()
+			})
+
+			return err
 		},
 		func(_ error) {
 			level.Debug(logger).Log("msg", "discovery manager exiting")
@@ -421,7 +549,13 @@ func Run(ctx context.Context, logger log.Logger, reg *prometheus.Registry, flags
 	)
 	gr.Add(
 		func() error {
-			return m.Run(discoveryManager.SyncCh())
+			var err error
+
+			pprof.Do(ctx, pprof.Labels("parca_component", "scraper"), func(_ context.Context) {
+				err = m.Run(discoveryManager.SyncCh())
+			})
+
+			return err
 		},
 		func(_ error) {
 			level.Debug(logger).Log("msg", "scrape manager exiting")
@@ -430,7 +564,13 @@ func Run(ctx context.Context, logger log.Logger, reg *prometheus.Registry, flags
 	)
 	gr.Add(
 		func() error {
-			return cfgReloader.Run(ctx)
+			var err error
+
+			pprof.Do(ctx, pprof.Labels("parca_component", "config_reloader"), func(ctx context.Context) {
+				err = cfgReloader.Run(ctx)
+			})
+
+			return err
 		},
 		func(_ error) {
 			level.Debug(logger).Log("msg", "config file reloader exiting")
@@ -440,42 +580,57 @@ func Run(ctx context.Context, logger log.Logger, reg *prometheus.Registry, flags
 	parcaserver := server.NewServer(reg, version)
 	gr.Add(
 		func() error {
-			return parcaserver.ListenAndServe(
-				ctx,
-				logger,
-				flags.HTTPAddress,
-				flags.CORSAllowedOrigins,
-				flags.PathPrefix,
-				server.RegisterableFunc(func(ctx context.Context, srv *grpc.Server, mux *runtime.ServeMux, endpoint string, opts []grpc.DialOption) error {
-					debuginfopb.RegisterDebuginfoServiceServer(srv, dbginfo)
-					profilestorepb.RegisterProfileStoreServiceServer(srv, s)
-					profilestorepb.RegisterAgentsServiceServer(srv, s)
-					querypb.RegisterQueryServiceServer(srv, q)
-					scrapepb.RegisterScrapeServiceServer(srv, m)
+			var err error
 
-					if err := debuginfopb.RegisterDebuginfoServiceHandlerFromEndpoint(ctx, mux, endpoint, opts); err != nil {
-						return err
-					}
+			pprof.Do(ctx, pprof.Labels("parca_component", "http_server"), func(ctx context.Context) {
+				err = parcaserver.ListenAndServe(
+					ctx,
+					logger,
+					uiFS,
+					flags.HTTPAddress,
+					flags.HTTPReadTimeout,
+					flags.HTTPWriteTimeout,
+					flags.CORSAllowedOrigins,
+					flags.PathPrefix,
+					server.RegisterableFunc(func(ctx context.Context, srv *grpc.Server, mux *runtime.ServeMux, endpoint string, opts []grpc.DialOption) error {
+						debuginfopb.RegisterDebuginfoServiceServer(srv, dbginfo)
+						profilestorepb.RegisterProfileStoreServiceServer(srv, s)
+						profilestorepb.RegisterAgentsServiceServer(srv, s)
+						otelgrpcprofilingpb.RegisterProfilesServiceServer(srv, s)
+						querypb.RegisterQueryServiceServer(srv, q)
+						scrapepb.RegisterScrapeServiceServer(srv, m)
+						telemetry.RegisterTelemetryServiceServer(srv, t)
 
-					if err := profilestorepb.RegisterProfileStoreServiceHandlerFromEndpoint(ctx, mux, endpoint, opts); err != nil {
-						return err
-					}
+						if err := debuginfopb.RegisterDebuginfoServiceHandlerFromEndpoint(ctx, mux, endpoint, opts); err != nil {
+							return err
+						}
 
-					if err := profilestorepb.RegisterAgentsServiceHandlerFromEndpoint(ctx, mux, endpoint, opts); err != nil {
-						return err
-					}
+						if err := profilestorepb.RegisterProfileStoreServiceHandlerFromEndpoint(ctx, mux, endpoint, opts); err != nil {
+							return err
+						}
 
-					if err := querypb.RegisterQueryServiceHandlerFromEndpoint(ctx, mux, endpoint, opts); err != nil {
-						return err
-					}
+						if err := profilestorepb.RegisterAgentsServiceHandlerFromEndpoint(ctx, mux, endpoint, opts); err != nil {
+							return err
+						}
 
-					if err := scrapepb.RegisterScrapeServiceHandlerFromEndpoint(ctx, mux, endpoint, opts); err != nil {
-						return err
-					}
+						if err := querypb.RegisterQueryServiceHandlerFromEndpoint(ctx, mux, endpoint, opts); err != nil {
+							return err
+						}
 
-					return nil
-				}),
-			)
+						if err := scrapepb.RegisterScrapeServiceHandlerFromEndpoint(ctx, mux, endpoint, opts); err != nil {
+							return err
+						}
+
+						if err := telemetry.RegisterTelemetryServiceHandlerFromEndpoint(ctx, mux, endpoint, opts); err != nil {
+							return err
+						}
+
+						return nil
+					}),
+				)
+			})
+
+			return err
 		},
 		func(_ error) {
 			ctx, cancel := context.WithTimeout(ctx, 30*time.Second) // TODO make this a graceful shutdown config setting
@@ -488,8 +643,11 @@ func Run(ctx context.Context, logger log.Logger, reg *prometheus.Registry, flags
 			}
 
 			// Close the columnstore after the parcaserver has shutdown to ensure no more writes occur against it.
-			if err := col.Close(); err != nil {
-				level.Error(logger).Log("msg", "error closing columnstore", "err", err)
+
+			if col != nil {
+				if err := col.Close(); err != nil {
+					level.Error(logger).Log("msg", "error closing columnstore", "err", err)
+				}
 			}
 		},
 	)
@@ -504,11 +662,12 @@ func Run(ctx context.Context, logger log.Logger, reg *prometheus.Registry, flags
 	return nil
 }
 
-func runScraper(
+func runForwarder(
 	ctx context.Context,
 	logger log.Logger,
 	reg *prometheus.Registry,
 	tracer trace.TracerProvider,
+	uiFS fs.FS,
 	flags *Flags,
 	version string,
 	cfg *config.Config,
@@ -517,13 +676,27 @@ func runScraper(
 		return fmt.Errorf("parca scraper mode needs to have a --store-address")
 	}
 
-	metrics := grpc_prometheus.NewClientMetrics()
-	metrics.EnableClientHandlingTimeHistogram()
+	metrics := grpc_prometheus.NewClientMetrics(
+		grpc_prometheus.WithClientHandlingTimeHistogram(
+			grpc_prometheus.WithHistogramOpts(&prometheus.HistogramOpts{
+				NativeHistogramBucketFactor: 1.1,
+			}),
+		),
+	)
 	reg.MustRegister(metrics)
 
+	propagators := propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{})
+
 	opts := []grpc.DialOption{
-		grpc.WithUnaryInterceptor(
+		grpc.WithStatsHandler(otelgrpc.NewServerHandler(
+			tracing.WithTracerProvider(tracer),
+			tracing.WithPropagators(propagators),
+		)),
+		grpc.WithChainUnaryInterceptor(
 			metrics.UnaryClientInterceptor(),
+		),
+		grpc.WithChainStreamInterceptor(
+			metrics.StreamClientInterceptor(),
 		),
 	}
 	if flags.Insecure {
@@ -552,25 +725,29 @@ func runScraper(
 		}))
 	}
 
-	conn, err := grpc.Dial(flags.StoreAddress, opts...)
+	conn, err := grpc.NewClient(flags.StoreAddress, opts...)
 	if err != nil {
 		return fmt.Errorf("failed to create gRPC connection: %w", err)
 	}
 
+	dbginfo := debuginfo.NewGRPCForwarder(debuginfopb.NewDebuginfoServiceClient(conn))
 	store := profilestore.NewGRPCForwarder(conn, logger)
+
+	sdMetrics, err := discovery.CreateAndRegisterSDMetrics(reg)
+	if err != nil {
+		level.Error(logger).Log("msg", "failed to register service discovery metrics", "err", err)
+		return err
+	}
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	discoveryManager := discovery.NewManager(ctx, logger)
+	discoveryManager := discovery.NewManager(ctx, logger, reg, sdMetrics)
 	if err := discoveryManager.ApplyConfig(getDiscoveryConfigs(cfg.ScrapeConfigs)); err != nil {
 		level.Error(logger).Log("msg", "failed to apply discovery configs", "err", err)
 		return err
 	}
 
-	externalLabels := labels.Labels{}
-	for name, value := range flags.ExternalLabel {
-		externalLabels = append(externalLabels, labels.Label{Name: name, Value: value})
-	}
+	externalLabels := labels.FromMap(flags.ExternalLabel)
 
 	m := scrape.NewManager(logger, reg, store, cfg.ScrapeConfigs, externalLabels)
 	if err := m.ApplyConfig(cfg.ScrapeConfigs); err != nil {
@@ -637,12 +814,26 @@ func runScraper(
 				return parcaserver.ListenAndServe(
 					serveCtx,
 					logger,
+					uiFS,
 					flags.HTTPAddress,
+					flags.HTTPReadTimeout,
+					flags.HTTPWriteTimeout,
 					flags.CORSAllowedOrigins,
 					flags.PathPrefix,
 					server.RegisterableFunc(func(ctx context.Context, srv *grpc.Server, mux *runtime.ServeMux, endpoint string, opts []grpc.DialOption) error {
 						scrapepb.RegisterScrapeServiceServer(srv, m)
+						profilestorepb.RegisterProfileStoreServiceServer(srv, store)
+						debuginfopb.RegisterDebuginfoServiceServer(srv, dbginfo)
+
+						if err := debuginfopb.RegisterDebuginfoServiceHandlerFromEndpoint(ctx, mux, endpoint, opts); err != nil {
+							return err
+						}
+
 						if err := scrapepb.RegisterScrapeServiceHandlerFromEndpoint(ctx, mux, endpoint, opts); err != nil {
+							return err
+						}
+
+						if err := profilestorepb.RegisterProfileStoreServiceHandlerFromEndpoint(ctx, mux, endpoint, opts); err != nil {
 							return err
 						}
 						return nil
@@ -702,44 +893,50 @@ func getDiscoveryConfigs(cfgs []*config.ScrapeConfig) map[string]discovery.Confi
 	return c
 }
 
-func initTracer(logger log.Logger, otlpAddress string) (trace.TracerProvider, func(), error) {
-	ctx := context.Background()
-
-	res, err := resource.New(ctx,
-		resource.WithAttributes(
-			semconv.ServiceNameKey.String("parca"),
-		),
-	)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create resource: %w", err)
+func BucketURIFromConfig(bucketCfg []byte) (string, error) {
+	bucketConf := &client.BucketConfig{}
+	if err := yaml.Unmarshal(bucketCfg, bucketConf); err != nil {
+		return "", fmt.Errorf("failed to unmarshal bucket config: %w", err)
 	}
 
-	// Set up a trace exporter
-	exporter, err := otlptracegrpc.New(ctx,
-		otlptracegrpc.WithInsecure(),
-		otlptracegrpc.WithEndpoint(otlpAddress),
-	)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create trace exporter: %w", err)
+	type Config struct {
+		Bucket string `yaml:"bucket"`
 	}
 
-	// Register the trace exporter with a TracerProvider, using a batch
-	// span processor to aggregate spans before export.
-	bsp := sdktrace.NewBatchSpanProcessor(exporter)
-	provider := sdktrace.NewTracerProvider(
-		sdktrace.WithSampler(sdktrace.AlwaysSample()),
-		sdktrace.WithResource(res),
-		sdktrace.WithSpanProcessor(bsp),
-	)
+	config, err := yaml.Marshal(bucketConf.Config)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal content of bucket configuration: %w", err)
+	}
 
-	// set global propagator to tracecontext (the default is no-op).
-	otel.SetTextMapPropagator(propagation.TraceContext{})
-	otel.SetTracerProvider(provider)
-
-	return provider, func() {
-		err := exporter.Shutdown(context.Background())
-		if err != nil {
-			level.Error(logger).Log("msg", "failed to stop exporter", "err", err)
+	switch strings.ToUpper(string(bucketConf.Type)) {
+	case string(client.GCS):
+		var cfg Config
+		if err := yaml.Unmarshal(config, &cfg); err != nil {
+			return "", err
 		}
-	}, nil
+		return filepath.Join("gs://", cfg.Bucket, bucketConf.Prefix), nil
+	case string(client.S3):
+		var cfg Config
+		if err := yaml.Unmarshal(config, &cfg); err != nil {
+			return "", err
+		}
+		return filepath.Join("s3://", cfg.Bucket, bucketConf.Prefix), nil
+	case string(client.FILESYSTEM):
+		type Config struct {
+			Directory string `yaml:"directory"`
+		}
+
+		var cfg Config
+		if err := yaml.Unmarshal(config, &cfg); err != nil {
+			return "", err
+		}
+
+		path, err := filepath.Abs(cfg.Directory)
+		if err != nil {
+			return "", err
+		}
+		return path, nil
+	default:
+		return "", fmt.Errorf("unknown bucket type: %s", bucketConf.Type)
+	}
 }

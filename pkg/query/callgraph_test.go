@@ -1,4 +1,4 @@
-// Copyright 2022 The Parca Authors
+// Copyright 2022-2025 The Parca Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -18,44 +18,48 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/go-kit/log"
-	"github.com/prometheus/client_golang/prometheus"
+	pprofprofile "github.com/google/pprof/profile"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/otel/trace"
 
-	pprofpb "github.com/parca-dev/parca/gen/proto/go/google/pprof"
 	pb "github.com/parca-dev/parca/gen/proto/go/parca/query/v1alpha1"
-	"github.com/parca-dev/parca/pkg/metastore"
-	"github.com/parca-dev/parca/pkg/metastoretest"
+	"github.com/parca-dev/parca/pkg/kv"
 	"github.com/parca-dev/parca/pkg/parcacol"
+	"github.com/parca-dev/parca/pkg/profile"
 )
 
 func TestGenerateCallgraph(t *testing.T) {
 	ctx := context.Background()
 
 	fileContent := MustReadAllGzip(t, "testdata/alloc_objects.pb.gz")
-	p := &pprofpb.Profile{}
-	require.NoError(t, p.UnmarshalVT(fileContent))
-	tracer := trace.NewNoopTracerProvider().Tracer("")
+	prof, err := pprofprofile.ParseData(fileContent)
+	require.NoError(t, err)
 
-	l := metastoretest.NewTestMetastore(
-		t,
-		log.NewNopLogger(),
-		prometheus.NewRegistry(),
-		tracer,
+	p, err := PprofToSymbolizedProfile(
+		profile.Meta{
+			Name: "memory",
+			SampleType: profile.ValueType{
+				Type: "alloc_objects",
+				Unit: "count",
+			},
+			PeriodType: profile.ValueType{
+				Type: "alloc_space",
+				Unit: "bytes",
+			},
+		},
+		prof,
+		0,
+		[]string{},
 	)
-	metastore := metastore.NewInProcessClient(l)
-	normalizer := parcacol.NewNormalizer(metastore)
-	profiles, err := normalizer.NormalizePprof(ctx, "memory", map[string]string{}, p, false)
 	require.NoError(t, err)
 
-	symbolizedProfile, err := parcacol.NewArrowToProfileConverter(tracer, metastore).SymbolizeNormalizedProfile(ctx, profiles[0])
+	op, err := parcacol.NewArrowToProfileConverter(nil, kv.NewKeyMaker()).Convert(ctx, p)
 	require.NoError(t, err)
 
-	res, err := GenerateCallgraph(ctx, symbolizedProfile)
+	res, err := GenerateCallgraph(ctx, op)
 	require.NoError(t, err)
 	require.NotNil(t, res)
 
+	//nolint:staticcheck // SA1019: Fow now we want to support these APIs
 	require.Equal(t, int64(310797348), res.Cumulative, "Root cummulative value mismatch")
 
 	/*

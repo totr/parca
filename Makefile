@@ -6,16 +6,17 @@ else
 GOBIN=$(shell go env GOBIN)
 endif
 ifeq ($(GITHUB_BRANCH_NAME),)
-	BRANCH := $(shell git rev-parse --abbrev-ref HEAD)-
+	BRANCH := $(shell $(CMD_GIT) rev-parse --abbrev-ref HEAD)-
 else
 	BRANCH := $(GITHUB_BRANCH_NAME)-
 endif
+COMMIT_TIMESTAMP := $(shell $(CMD_GIT) show --no-patch --format=%ct)-
 ifeq ($(GITHUB_SHA),)
-	COMMIT := $(shell git describe --no-match --dirty --always --abbrev=8)
+	COMMIT := $(shell $(CMD_GIT) rev-parse --short=8 HEAD)
 else
 	COMMIT := $(shell echo $(GITHUB_SHA) | cut -c1-8)
 endif
-VERSION ?= $(if $(RELEASE_TAG),$(RELEASE_TAG),$(shell $(CMD_GIT) describe --tags 2>/dev/null || echo '$(BRANCH)$(COMMIT)'))
+VERSION ?= $(if $(RELEASE_TAG),$(RELEASE_TAG),$(shell $(CMD_GIT) describe --tags --match='v*' || echo '$(subst /,-,$(BRANCH))$(COMMIT_TIMESTAMP)$(COMMIT)'))
 OUT_DOCKER ?= ghcr.io/parca-dev/parca
 
 ENABLE_RACE := no
@@ -41,11 +42,22 @@ clean:
 	rm -rf data
 	rm -rf tmp
 	rm -rf bin
-	rm -rf ui/packages/app/web/build
+	mv ui/packages/app/web/build/keep.go /tmp/keep.go
+	rm -rf ui/packages/app/web/build/*
+	mv /tmp/keep.go ui/packages/app/web/build/keep.go
+	find . -name 'node_modules' -type d -prune -exec rm -rf '{}' +
+	find . -name 'dist' -type d -prune -exec rm -rf '{}' +
 
 .PHONY: go/deps
 go/deps:
 	go mod tidy
+
+.PHONY: go/deps-check
+go/deps-check:
+	govulncheck ./...
+
+.PHONY: go/build
+go/build: go/bin
 
 .PHONY: go/bin
 go/bin: go/deps
@@ -53,13 +65,13 @@ go/bin: go/deps
 	go build $(SANITIZERS) -gcflags="all=-N -l" -o bin/ ./cmd/parca
 
 # renovate: datasource=go depName=mvdan.cc/gofumpt
-GOFUMPT_VERSION := v0.4.0
+GOFUMPT_VERSION := v0.7.0
 gofumpt:
-ifeq (, $(shell which gofumpt))
+ifeq (, $(shell command -v gofumpt >/dev/null))
 	go install mvdan.cc/gofumpt@$(GOFUMPT_VERSION)
 GOFUMPT=$(GOBIN)/gofumpt
 else
-GOFUMPT=$(shell which gofumpt)
+GOFUMPT=$(shell command -v gofumpt)
 endif
 
 # Rather than running this over and over we recommend running gofumpt on save with your editor.
@@ -78,12 +90,12 @@ check-license:
 
 .PHONY: go/test
 go/test:
-	go test $(SANITIZERS) -v `go list ./...`
+	go test $(SANITIZERS) -tags assert -v `go list ./...`
 
 .PHONY: go/bench
 go/bench:
 	mkdir -pm 777 tmp/
-	go test $(SANITIZERS) -run=. -bench=. -benchtime=1x `go list ./...` # run benchmark with one iteration to make sure they work
+	go test $(SANITIZERS) -run=. -bench=. -benchtime=1x -v `go list ./...` # run benchmark with one iteration to make sure they work
 
 VCR_FILES ?= $(shell find ./pkg/*/testdata -name "fixtures.yaml")
 
@@ -94,15 +106,15 @@ go/test-clean:
 UI_FILES ?= $(shell find ./ui -name "*" -not -path "./ui/lib/node_modules/*" -not -path "./ui/node_modules/*" -not -path "./ui/packages/app/template/node_modules/*" -not -path "./ui/packages/app/web/node_modules/*" -not -path "./ui/packages/app/web/build/*")
 .PHONY: ui/build
 ui/build: $(UI_FILES)
-	cd ui && yarn --prefer-offline && yarn bootstrap && yarn build
+	cd ui && pnpm install --frozen-lockfile --prefer-offline && pnpm run build
 
 .PHONY: ui/test
 ui/test:
-	cd ui && yarn test
+	cd ui && pnpm run test
 
 .PHONY: ui/lint
 ui/lint:
-	cd ui && yarn run lint
+	cd ui && pnpm run lint
 
 .PHONY: proto/all
 proto/all: proto/vendor proto/format proto/lint proto/generate
@@ -153,7 +165,7 @@ push-container:
 .PHONY: sign-container
 sign-container:
 	crane digest $(OUT_DOCKER):$(VERSION)
-	cosign sign --force -a GIT_HASH=$(COMMIT) -a GIT_VERSION=$(VERSION) $(OUT_DOCKER)@$(shell crane digest $(OUT_DOCKER):$(VERSION))
+	cosign sign --yes -a GIT_HASH=$(COMMIT) -a GIT_VERSION=$(VERSION) $(OUT_DOCKER)@$(shell crane digest $(OUT_DOCKER):$(VERSION))
 
 .PHONY: push-quay-container
 push-quay-container:
@@ -189,11 +201,11 @@ tmp/help.txt: build
 EMBEDMD_VERSION ?= v2.0.0
 
 embedmd:
-ifeq (, $(shell which embedmd))
+ifeq (, $(shell command -v embedmd >/dev/null))
 	go install github.com/campoy/embedmd/v2@$(EMBEDMD_VERSION)
 EMBEDMD=$(GOBIN)/embedmd
 else
-EMBEDMD=$(shell which embedmd)
+EMBEDMD=$(shell command -v embedmd)
 endif
 
 README.md: embedmd tmp/help.txt
@@ -201,8 +213,8 @@ README.md: embedmd tmp/help.txt
 
 .PHONY: release-dry-run
 release-dry-run:
-	goreleaser release --rm-dist --auto-snapshot --skip-validate --skip-publish --debug
+	goreleaser release --clean --auto-snapshot --skip-validate --skip-publish --debug
 
 .PHONY: release-build
 release-build:
-	goreleaser build --rm-dist --skip-validate --snapshot --debug
+	goreleaser build --clean --skip-validate --snapshot --debug

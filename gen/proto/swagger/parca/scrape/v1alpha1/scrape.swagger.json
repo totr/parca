@@ -103,10 +103,25 @@
         "details": {
           "type": "array",
           "items": {
+            "type": "object",
             "$ref": "#/definitions/protobufAny"
           }
         }
       }
+    },
+    "scrapev1alpha1Targets": {
+      "type": "object",
+      "properties": {
+        "targets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/v1alpha1Target"
+          },
+          "title": "targets is a list of targets"
+        }
+      },
+      "title": "Targets is a list of targets"
     },
     "v1alpha1LabelSet": {
       "type": "object",
@@ -114,6 +129,7 @@
         "labels": {
           "type": "array",
           "items": {
+            "type": "object",
             "$ref": "#/definitions/profilestorev1alpha1Label"
           },
           "title": "labels are the grouping of labels"
@@ -156,19 +172,6 @@
       },
       "title": "Target is the scrape target representation"
     },
-    "v1alpha1Targets": {
-      "type": "object",
-      "properties": {
-        "targets": {
-          "type": "array",
-          "items": {
-            "$ref": "#/definitions/v1alpha1Target"
-          },
-          "title": "targets is a list of targets"
-        }
-      },
-      "title": "Targets is a list of targets"
-    },
     "v1alpha1TargetsRequestState": {
       "type": "string",
       "enum": [
@@ -186,7 +189,7 @@
         "targets": {
           "type": "object",
           "additionalProperties": {
-            "$ref": "#/definitions/v1alpha1Targets"
+            "$ref": "#/definitions/scrapev1alpha1Targets"
           },
           "title": "targets is the mapping of targets"
         }

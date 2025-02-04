@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Copyright 2022 The Parca Authors
+# Copyright 2022-2025 The Parca Authors
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-yarn build
+pnpm run build
 mkdir PATH_PREFIX_VAR
 cp -r ./build/* ./PATH_PREFIX_VAR/
 mv ./PATH_PREFIX_VAR ./build/

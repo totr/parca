@@ -11,11 +11,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import {Listbox, Transition} from '@headlessui/react';
-import {CheckIcon, SelectorIcon} from '@heroicons/react/solid';
-import cx from 'classnames';
-import {useParcaContext} from '../ParcaContext';
 import {Fragment} from 'react';
+
+import {Listbox, Transition} from '@headlessui/react';
+import {Icon} from '@iconify/react';
+import cx from 'classnames';
+
+import {useParcaContext} from '../ParcaContext';
 
 export interface SelectElement {
   active: JSX.Element;
@@ -24,6 +26,7 @@ export interface SelectElement {
 
 export interface SelectItem {
   key: string;
+  disabled?: boolean;
   element: SelectElement;
 }
 
@@ -42,14 +45,22 @@ const Select = ({
   width,
   className = '',
   loading,
+  primary = false,
+  disabled = false,
+  icon,
+  id,
 }: {
   items: SelectItem[];
   selectedKey: string | undefined;
-  onSelection: (value: string | undefined) => void;
+  onSelection: (value: string) => void;
   placeholder?: string;
   width?: number;
   className?: string;
   loading?: boolean;
+  primary?: boolean;
+  disabled?: boolean;
+  icon?: JSX.Element;
+  id?: string;
 }): JSX.Element => {
   const selection = items.find(v => v.key === selectedKey) ?? {
     key: selectedKey,
@@ -57,88 +68,96 @@ const Select = ({
   };
   const {loader} = useParcaContext();
 
+  const styles =
+    'relative border rounded-md shadow-sm px-4 py-2 text-left cursor-default focus:outline-none focus:ring-1 items-center focus:ring-indigo-500 focus:border-indigo-500 text-sm flex gap-2 flex items-center justify-between';
+  const defaultStyles = 'bg-white dark:bg-gray-900 dark:border-gray-600';
+  const primaryStyles =
+    'text-gray-100 dark:gray-900 bg-indigo-600 border-indigo-500 font-medium py-2 px-4';
+
   return (
-    <>
-      <Listbox value={selectedKey} onChange={onSelection}>
-        {({open}) => (
-          <>
-            <div className="min-w-fit">
-              <Listbox.Button
+    <Listbox value={selectedKey} onChange={onSelection}>
+      {({open}) => (
+        <div className="relative">
+          <div id={id}>
+            <Listbox.Button
+              className={cx(
+                styles,
+                width !== undefined ? `w-${width}` : 'w-full',
+                disabled ? 'cursor-not-allowed opacity-50 pointer-events-none' : '',
+                primary ? primaryStyles : defaultStyles,
+                {[className]: className.length > 0}
+              )}
+            >
+              <div
                 className={cx(
-                  width !== undefined ? `w-${width}` : '',
-                  'relative bg-gray-50 dark:bg-gray-900 border-t border-r border-b border-l dark:border-gray-600 rounded-md shadow-sm pl-3 pr-10 py-2 text-left cursor-default focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm text-sm',
-                  {[className]: className.length > 0}
+                  icon != null ? '' : 'block overflow-x-hidden text-ellipsis whitespace-nowrap'
                 )}
               >
-                <span className="flex items-center">
-                  {/* SLOT */}
-                  <span className="ml-3 block overflow-x-hidden text-ellipsis">
-                    {selection?.key !== '' ? selection.element.active : placeholder}
-                  </span>
-                </span>
-                <span className="ml-3 absolute inset-y-0 right-0 flex items-center pr-2 pointer-events-none">
-                  <SelectorIcon className="h-5 w-5 text-gray-400" aria-hidden="true" />
-                </span>
-              </Listbox.Button>
+                {selection?.key !== '' ? selection.element.active : placeholder}
+              </div>
+              <div className={cx(icon != null ? '' : 'pointer-events-none text-gray-400')}>
+                {icon ?? <Icon icon="heroicons:chevron-up-down-20-solid" aria-hidden="true" />}
+              </div>
+            </Listbox.Button>
+          </div>
 
-              <Transition
-                show={open}
-                as={Fragment}
-                leave="transition ease-in duration-100"
-                leaveFrom="opacity-100"
-                leaveTo="opacity-0"
-              >
-                <Listbox.Options
-                  className={cx(
-                    width !== undefined ? `w-${width}` : '',
-                    'absolute z-10 mt-1 bg-gray-50 dark:bg-gray-900 dark:border-gray-600 shadow-lg rounded-md py-1 text-base ring-1 ring-black dark:ring-white ring-opacity-5 dark:ring-opacity-20 overflow-auto focus:outline-none sm:text-sm'
-                  )}
-                >
-                  {loading === true ? (
-                    <div className="w-[270px]">{loader}</div>
-                  ) : (
-                    items.map(option => (
-                      <Listbox.Option
-                        key={option.key}
-                        className={({active}) =>
-                          cx(
-                            active && 'text-white bg-indigo-600',
-                            'cursor-default select-none relative py-2 pl-3 pr-9'
-                          )
-                        }
-                        value={option.key}
-                      >
-                        {({selected, active}) => (
-                          <>
-                            <div className="flex items-center">
-                              <span
-                                className={cx(selected ? 'font-semibold' : 'font-normal', 'ml-3')}
-                              >
-                                {option.element.expanded}
-                              </span>
-                            </div>
-                            {selected ? (
-                              <span
-                                className={cx(
-                                  active ? 'text-white' : 'text-indigo-600',
-                                  'absolute inset-y-0 right-0 flex items-center pr-4'
-                                )}
-                              >
-                                <CheckIcon className="h-5 w-5" aria-hidden="true" />
-                              </span>
-                            ) : null}
-                          </>
-                        )}
-                      </Listbox.Option>
-                    ))
-                  )}
-                </Listbox.Options>
-              </Transition>
-            </div>
-          </>
-        )}
-      </Listbox>
-    </>
+          <Transition
+            show={open}
+            as={Fragment}
+            leave="transition ease-in duration-100"
+            leaveFrom="opacity-100"
+            leaveTo="opacity-0"
+          >
+            <Listbox.Options
+              className={cx(
+                'absolute z-50 mt-1 pt-0 max-h-[50vh] w-max overflow-auto rounded-md bg-gray-50 py-1 text-base shadow-lg ring-1 ring-black ring-opacity-5 focus:outline-none dark:border-gray-600 dark:bg-gray-900 dark:ring-white dark:ring-opacity-20 sm:text-sm'
+              )}
+            >
+              {loading === true ? (
+                <div className="w-[270px]">{loader}</div>
+              ) : (
+                items.length > 0 &&
+                items.map(option => (
+                  <Listbox.Option
+                    id={`h-select-option-${option.key}`}
+                    key={option.key}
+                    disabled={option.disabled ?? false}
+                    className={({active, disabled}) =>
+                      cx(
+                        active && 'bg-indigo-600 text-white',
+                        'relative cursor-default select-none py-2 pl-3 pr-9',
+                        disabled && 'opacity-50'
+                      )
+                    }
+                    value={option.key}
+                  >
+                    {({selected, active}) => (
+                      <>
+                        <div className="flex items-center">
+                          <span className={cx(selected ? 'font-semibold' : 'font-normal', 'ml-3')}>
+                            {option.element.expanded}
+                          </span>
+                        </div>
+                        {selected ? (
+                          <span
+                            className={cx(
+                              active ? 'text-white' : 'text-indigo-600',
+                              'absolute inset-y-0 right-0 flex items-center pr-4'
+                            )}
+                          >
+                            <Icon icon="heroicons:check-20-solid" aria-hidden="true" />
+                          </span>
+                        ) : null}
+                      </>
+                    )}
+                  </Listbox.Option>
+                ))
+              )}
+            </Listbox.Options>
+          </Transition>
+        </div>
+      )}
+    </Listbox>
   );
 };
 

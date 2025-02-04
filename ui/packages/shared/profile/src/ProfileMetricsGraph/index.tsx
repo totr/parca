@@ -11,14 +11,42 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import {useState, useEffect} from 'react';
-import MetricsGraph from '../MetricsGraph';
-import {ProfileSelection, SingleProfileSelection} from '..';
-import {QueryServiceClient, QueryRangeResponse, Label, Timestamp} from '@parca/client';
-import {RpcError} from '@protobuf-ts/runtime-rpc';
-import {DateTimeRange, useGrpcMetadata, useParcaContext} from '@parca/components';
+import {useEffect} from 'react';
+
+import {AnimatePresence, motion} from 'framer-motion';
+
+import {Label, QueryServiceClient} from '@parca/client';
+import {DateTimeRange, MetricsGraphSkeleton, useParcaContext} from '@parca/components';
 import {Query} from '@parca/parser';
-import useDelayedLoader from '../useDelayedLoader';
+import {capitalizeOnlyFirstLetter} from '@parca/utilities';
+
+import {MergedProfileSelection, ProfileSelection} from '..';
+import MetricsGraph from '../MetricsGraph';
+import {useMetricsGraphDimensions} from '../MetricsGraph/useMetricsGraphDimensions';
+import {useQueryRange} from './hooks/useQueryRange';
+
+interface ProfileMetricsEmptyStateProps {
+  message: string;
+}
+
+const ErrorContent = ({errorMessage}: {errorMessage: string}): JSX.Element => {
+  return (
+    <div
+      className="relative rounded border border-red-400 bg-red-100 px-4 py-3 text-red-700"
+      role="alert"
+    >
+      <span className="block sm:inline">{errorMessage}</span>
+    </div>
+  );
+};
+
+export const ProfileMetricsEmptyState = ({message}: ProfileMetricsEmptyStateProps): JSX.Element => {
+  return (
+    <div className="flex h-full w-full flex-col items-center justify-center">
+      <p>{message}</p>
+    </div>
+  );
+};
 
 interface ProfileMetricsGraphProps {
   queryClient: QueryServiceClient;
@@ -26,56 +54,20 @@ interface ProfileMetricsGraphProps {
   profile: ProfileSelection | null;
   from: number;
   to: number;
-  select: (source: ProfileSelection) => void;
+  sumByLoading: boolean;
+  sumBy: string[];
   setTimeRange: (range: DateTimeRange) => void;
-  addLabelMatcher: (key: string, value: string) => void;
+  addLabelMatcher: (
+    labels: {key: string; value: string} | Array<{key: string; value: string}>
+  ) => void;
+  onPointClick: (
+    timestamp: number,
+    labels: Label[],
+    queryExpression: string,
+    duration: number
+  ) => void;
+  comparing?: boolean;
 }
-
-export interface IQueryRangeState {
-  response: QueryRangeResponse | null;
-  isLoading: boolean;
-  error: RpcError | null;
-}
-
-export const useQueryRange = (
-  client: QueryServiceClient,
-  queryExpression: string,
-  start: number,
-  end: number
-): IQueryRangeState => {
-  const [state, setState] = useState<IQueryRangeState>({
-    response: null,
-    isLoading: true,
-    error: null,
-  });
-  const metadata = useGrpcMetadata();
-
-  useEffect(() => {
-    void (async () => {
-      setState({
-        response: null,
-        isLoading: true,
-        error: null,
-      });
-
-      const call = client.queryRange(
-        {
-          query: queryExpression,
-          start: Timestamp.fromDate(new Date(start)),
-          end: Timestamp.fromDate(new Date(end)),
-          limit: 0,
-        },
-        {meta: metadata}
-      );
-
-      call.response
-        .then(response => setState({response, isLoading: false, error: null}))
-        .catch(error => setState({response: null, isLoading: false, error}));
-    })();
-  }, [client, queryExpression, start, end, metadata]);
-
-  return state;
-};
 
 const ProfileMetricsGraph = ({
   queryClient,
@@ -83,63 +75,98 @@ const ProfileMetricsGraph = ({
   profile,
   from,
   to,
-  select,
   setTimeRange,
   addLabelMatcher,
+  onPointClick,
+  comparing = false,
+  sumBy,
+  sumByLoading,
 }: ProfileMetricsGraphProps): JSX.Element => {
-  const {isLoading, response, error} = useQueryRange(queryClient, queryExpression, from, to);
-  const isLoaderVisible = useDelayedLoader(isLoading);
-  const {loader} = useParcaContext();
+  const {
+    isLoading: metricsGraphLoading,
+    response,
+    error,
+  } = useQueryRange(queryClient, queryExpression, from, to, sumBy, sumByLoading);
+  const {onError, perf, authenticationErrorMessage, isDarkMode} = useParcaContext();
+  const {width, height, margin, heightStyle} = useMetricsGraphDimensions(comparing);
 
-  if (isLoaderVisible) {
-    return <>{loader}</>;
-  }
+  useEffect(() => {
+    if (error !== null) {
+      onError?.(error);
+    }
+  }, [error, onError]);
 
-  if (error !== null) {
-    return (
-      <div
-        className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative"
-        role="alert"
-      >
-        <strong className="font-bold">Error! </strong>
-        <span className="block sm:inline">{error.message}</span>
-      </div>
-    );
-  }
+  useEffect(() => {
+    if (response === null) {
+      return;
+    }
+
+    perf?.markInteraction('Metrics graph render', response.series[0].samples.length);
+  }, [perf, response]);
 
   const series = response?.series;
-  if (series !== null && series !== undefined && series?.length > 0) {
-    const handleSampleClick = (timestamp: number, _value: number, labels: Label[]): void => {
-      select(
-        new SingleProfileSelection(Query.parse(queryExpression).profileName(), labels, timestamp)
-      );
-    };
 
-    return (
-      <div
-        className="dark:bg-gray-700 rounded border-gray-300 dark:border-gray-500"
-        style={{borderWidth: 1}}
-      >
-        <MetricsGraph
-          data={series}
-          from={from}
-          to={to}
-          profile={profile as SingleProfileSelection}
-          setTimeRange={setTimeRange}
-          onSampleClick={handleSampleClick}
-          onLabelClick={addLabelMatcher}
-          width={0}
-          sampleUnit={Query.parse(queryExpression).profileType().sampleUnit}
-        />
-      </div>
-    );
+  const dataAvailable = series !== null && series !== undefined && series?.length > 0;
+
+  const loading = metricsGraphLoading;
+
+  if (!metricsGraphLoading && error !== null) {
+    if (authenticationErrorMessage !== undefined && error.code === 'UNAUTHENTICATED') {
+      return <ErrorContent errorMessage={authenticationErrorMessage} />;
+    }
+
+    return <ErrorContent errorMessage={capitalizeOnlyFirstLetter(error.message)} />;
   }
+
+  let sampleUnit = '';
+
+  if (dataAvailable) {
+    if (series.every((val, i, arr) => val?.sampleType?.unit === arr[0]?.sampleType?.unit)) {
+      sampleUnit = series[0]?.sampleType?.unit ?? '';
+    }
+    if (sampleUnit === '') {
+      sampleUnit = Query.parse(queryExpression).profileType().sampleUnit;
+    }
+  }
+
   return (
-    <div className="grid grid-cols-1">
-      <div className="py-20 flex justify-center">
-        <p className="m-0">No data found. Try a different query.</p>
-      </div>
-    </div>
+    <AnimatePresence>
+      <motion.div
+        className="h-full w-full relative"
+        key="metrics-graph-loaded"
+        initial={{display: 'none', opacity: 0}}
+        animate={{display: 'block', opacity: 1}}
+        transition={{duration: 0.5}}
+      >
+        {loading ? (
+          <MetricsGraphSkeleton heightStyle={heightStyle} isDarkMode={isDarkMode} />
+        ) : dataAvailable ? (
+          <MetricsGraph
+            data={series}
+            from={from}
+            to={to}
+            profile={profile as MergedProfileSelection}
+            setTimeRange={setTimeRange}
+            onSampleClick={(
+              timestamp: number,
+              _value: number,
+              labels: Label[],
+              duration: number
+            ): void => {
+              onPointClick(timestamp, labels, queryExpression, duration);
+            }}
+            addLabelMatcher={addLabelMatcher}
+            sampleUnit={sampleUnit}
+            height={height}
+            width={width}
+            margin={margin}
+            sumBy={sumBy}
+          />
+        ) : (
+          <ProfileMetricsEmptyState message="No data found. Try a different query." />
+        )}
+      </motion.div>
+    </AnimatePresence>
   );
 };
 

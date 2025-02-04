@@ -12,32 +12,35 @@
 // limitations under the License.
 
 import {Grammar, Parser} from 'nearley';
-import grammar from './selector';
+
+import {grammar} from './selector';
 
 export function NewParser(): Parser {
   return new Parser(Grammar.fromCompiled(grammar), {keepHistory: true});
 }
 
-export enum MatcherType {
-  MatchEqual = '=',
-  MatchNotEqual = '!=',
-  MatchRegexp = '=~',
-  MatchNotRegexp = '!~',
-}
+export const MatcherTypes = {
+  MatchEqual: '=',
+  MatchNotEqual: '!=',
+  MatchRegexp: '=~',
+  MatchNotRegexp: '!~',
+} as const;
+
+export type MatcherType = (typeof MatcherTypes)[keyof typeof MatcherTypes];
 
 function matcherTypeFromString(matcherTypeString: string): MatcherType {
   switch (matcherTypeString) {
-    case MatcherType.MatchEqual: {
-      return MatcherType.MatchEqual;
+    case MatcherTypes.MatchEqual: {
+      return MatcherTypes.MatchEqual;
     }
-    case MatcherType.MatchNotEqual: {
-      return MatcherType.MatchNotEqual;
+    case MatcherTypes.MatchNotEqual: {
+      return MatcherTypes.MatchNotEqual;
     }
-    case MatcherType.MatchRegexp: {
-      return MatcherType.MatchRegexp;
+    case MatcherTypes.MatchRegexp: {
+      return MatcherTypes.MatchRegexp;
     }
-    case MatcherType.MatchNotRegexp: {
-      return MatcherType.MatchNotRegexp;
+    case MatcherTypes.MatchNotRegexp: {
+      return MatcherTypes.MatchNotRegexp;
     }
     default: {
       throw new Error('Unknown matcher type: ' + matcherTypeString);
@@ -110,7 +113,7 @@ export class Matcher {
 }
 
 function isProfileNameMatcher(m: Matcher): boolean {
-  return m.key === '__name__' && m.matcherType === MatcherType.MatchEqual;
+  return m.key === '__name__' && m.matcherType === MatcherTypes.MatchEqual;
 }
 
 export class ProfileType {
@@ -383,7 +386,7 @@ export class Query {
     if (this.matchers.find(e => e.key === key && e.value === `"${value}"`) != null) {
       return [this, false];
     }
-    const matcher = new Matcher(key, MatcherType.MatchEqual, value);
+    const matcher = new Matcher(key, MatcherTypes.MatchEqual, value);
     if (this.matchers.find(e => e.key === key) != null) {
       return [
         new Query(
@@ -395,6 +398,16 @@ export class Query {
       ];
     }
     return [new Query(this.profType, this.matchers.concat([matcher]), ''), true];
+  }
+
+  setMultipleMatchers(matchers: Array<{key: string; value: string}>): [Query, boolean] {
+    const newMatchers: Matcher[] = [];
+    matchers.forEach(({key, value}: {key: string; value: string}) => {
+      const newMatcher = new Matcher(key, MatcherTypes.MatchEqual, value);
+      newMatchers.push(newMatcher);
+    });
+
+    return [new Query(this.profType, newMatchers, ''), true];
   }
 
   setProfileName(name: string): [Query, boolean] {

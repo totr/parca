@@ -1,4 +1,4 @@
-// Copyright 2022 The Parca Authors
+// Copyright 2022-2025 The Parca Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -25,34 +25,55 @@ import (
 	"github.com/go-kit/log"
 	"github.com/stretchr/testify/require"
 	"github.com/thanos-io/objstore"
-	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
 	debuginfopb "github.com/parca-dev/parca/gen/proto/go/parca/debuginfo/v1alpha1"
 )
 
-type fakeDebuginfodClient struct {
-	items map[string]io.ReadCloser
+type fakeDebuginfodClients struct {
+	get       func(ctx context.Context, server, buildID string) (io.ReadCloser, error)
+	getSource func(ctx context.Context, server, buildID, file string) (io.ReadCloser, error)
+	exists    func(ctx context.Context, buildID string) ([]string, error)
 }
 
-func (c *fakeDebuginfodClient) Get(ctx context.Context, buildid string) (io.ReadCloser, error) {
-	item, ok := c.items[buildid]
-	if !ok {
-		return nil, ErrDebuginfoNotFound
+func (f *fakeDebuginfodClients) Get(ctx context.Context, server, buildID string) (io.ReadCloser, error) {
+	return f.get(ctx, server, buildID)
+}
+
+func (f *fakeDebuginfodClients) GetSource(ctx context.Context, server, buildID, file string) (io.ReadCloser, error) {
+	return f.getSource(ctx, server, buildID, file)
+}
+
+func (f *fakeDebuginfodClients) Exists(ctx context.Context, buildID string) ([]string, error) {
+	return f.exists(ctx, buildID)
+}
+
+func newFakeDebuginfodClientsWithItems(items map[string]io.ReadCloser) *fakeDebuginfodClients {
+	return &fakeDebuginfodClients{
+		get: func(ctx context.Context, server, buildid string) (io.ReadCloser, error) {
+			item, ok := items[buildid]
+			if !ok || server != "fake" {
+				return nil, ErrDebuginfoNotFound
+			}
+
+			return item, nil
+		},
+		exists: func(ctx context.Context, buildid string) ([]string, error) {
+			_, ok := items[buildid]
+			if ok {
+				return []string{"fake"}, nil
+			}
+
+			return nil, nil
+		},
 	}
-
-	return item, nil
-}
-
-func (c *fakeDebuginfodClient) Exists(ctx context.Context, buildid string) (bool, error) {
-	_, ok := c.items[buildid]
-	return ok, nil
 }
 
 func TestStore(t *testing.T) {
 	ctx := context.Background()
-	tracer := trace.NewNoopTracerProvider().Tracer("")
+	tracer := noop.NewTracerProvider().Tracer("")
 
 	logger := log.NewNopLogger()
 	bucket := objstore.NewInMemBucket()
@@ -63,11 +84,9 @@ func TestStore(t *testing.T) {
 		logger,
 		metadata,
 		bucket,
-		&fakeDebuginfodClient{
-			items: map[string]io.ReadCloser{
-				"deadbeef": io.NopCloser(bytes.NewBufferString("debuginfo1")),
-			},
-		},
+		newFakeDebuginfodClientsWithItems(map[string]io.ReadCloser{
+			"deadbeef": io.NopCloser(bytes.NewBufferString("debuginfo1")),
+		}),
 		SignedUpload{
 			Enabled: false,
 		},
@@ -90,7 +109,7 @@ func TestStore(t *testing.T) {
 		}
 	}()
 
-	conn, err := grpc.Dial(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
 	defer conn.Close()
 
@@ -123,6 +142,7 @@ func TestStore(t *testing.T) {
 	_, err = debuginfoClient.InitiateUpload(ctx, &debuginfopb.InitiateUploadRequest{
 		BuildId: "abcd",
 		Hash:    "foo",
+		Size:    2,
 	})
 	require.NoError(t, err)
 
@@ -144,6 +164,7 @@ func TestStore(t *testing.T) {
 	initiateResp, err := debuginfoClient.InitiateUpload(ctx, &debuginfopb.InitiateUploadRequest{
 		BuildId: "abcd",
 		Hash:    "foo",
+		Size:    2,
 	})
 	require.NoError(t, err)
 
@@ -173,7 +194,7 @@ func TestStore(t *testing.T) {
 	// If asynchronously we figured out the debuginfo was not a valid ELF file,
 	// we should allow uploading something else. Don't test the whole upload
 	// flow again, just the ShouldInitiateUpload part.
-	require.NoError(t, metadata.MarkAsNotValidELF(ctx, "abcd"))
+	require.NoError(t, metadata.SetQuality(ctx, "abcd", debuginfopb.DebuginfoType_DEBUGINFO_TYPE_DEBUGINFO_UNSPECIFIED, &debuginfopb.DebuginfoQuality{NotValidElf: true}))
 	shouldInitiateResp, err = debuginfoClient.ShouldInitiateUpload(ctx, &debuginfopb.ShouldInitiateUploadRequest{BuildId: "abcd"})
 	require.NoError(t, err)
 	require.Equal(t, ReasonDebuginfoInvalid, shouldInitiateResp.Reason)
@@ -192,6 +213,7 @@ func TestStore(t *testing.T) {
 	_, err = debuginfoClient.InitiateUpload(ctx, &debuginfopb.InitiateUploadRequest{
 		BuildId: "abcd",
 		Hash:    "foo",
+		Size:    2,
 	})
 	require.EqualError(t, err, "rpc error: code = AlreadyExists desc = Debuginfo already exists and is marked as invalid, but the proposed hash is the same as the one already available, therefore the upload is not accepted as it would result in the same invalid debuginfos.")
 
@@ -217,7 +239,7 @@ func TestStore(t *testing.T) {
 	require.False(t, shouldInitiateResp.ShouldInitiateUpload)
 
 	// If we mark the debuginfo as invalid, we should allow uploading.
-	require.NoError(t, metadata.MarkAsNotValidELF(ctx, "deadbeef"))
+	require.NoError(t, metadata.SetQuality(ctx, "deadbeef", debuginfopb.DebuginfoType_DEBUGINFO_TYPE_DEBUGINFO_UNSPECIFIED, &debuginfopb.DebuginfoQuality{NotValidElf: true}))
 
 	shouldInitiateResp, err = debuginfoClient.ShouldInitiateUpload(ctx, &debuginfopb.ShouldInitiateUploadRequest{BuildId: "deadbeef"})
 	require.NoError(t, err)

@@ -11,23 +11,91 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import {createContext, ReactNode, useContext, ProfilerOnRenderCallback} from 'react';
-import Spinner from '../Spinner';
+import {FC, ProfilerOnRenderCallback, ReactNode, createContext, useContext} from 'react';
+
+import {RpcError} from '@protobuf-ts/runtime-rpc';
+
+import {QueryServiceClient} from '@parca/client';
+import type {ColorConfig, NavigateFunction} from '@parca/utilities';
+
+import {NoDataPrompt} from '../NoDataPrompt';
+import Spinner, {SpinnerProps} from '../Spinner';
+
+export interface ProfileData {
+  line: number;
+  cumulative: number;
+  flat: number;
+}
+
+export interface SourceViewContextMenuItem {
+  id: string;
+  label: string;
+  action: (selectedCode: string, profileData: ProfileData[]) => void;
+}
 
 interface Props {
-  loader: ReactNode;
+  Spinner: FC<SpinnerProps>;
+  loader?: ReactNode;
+  noDataPrompt?: ReactNode;
+  profileExplorer?: {
+    PaddingX: number;
+    metricsGraph: {
+      maxHeightStyle: {
+        default: string;
+        compareMode: string;
+      };
+    };
+  };
   perf?: {
     onRender?: ProfilerOnRenderCallback;
-    markInteraction: (interactionName: string, sampleCount: number | string) => void;
+    markInteraction: (interactionName: string, sampleCount: number | string | bigint) => void;
   };
+  onError?: (error: RpcError) => void;
+  queryServiceClient: QueryServiceClient;
+  navigateTo: NavigateFunction;
+  enableSourcesView?: boolean;
+  enableIciclechartView?: boolean;
+  authenticationErrorMessage?: string;
+  isDarkMode: boolean;
+  flamegraphHint?: ReactNode;
+  viewComponent?: {
+    emitQuery: (query: string) => void;
+    createViewComponent?: ReactNode;
+    disableProfileTypesDropdown?: boolean;
+    labelnames?: string[];
+    disableExplorativeQuerying?: boolean;
+  };
+  profileViewExternalMainActions?: ReactNode;
+  profileViewExternalSubActions?: ReactNode;
+  sourceViewContextMenuItems?: SourceViewContextMenuItem[];
+  additionalFlamegraphColorProfiles?: Record<string, ColorConfig>;
+  timezone?: string;
+  preferencesModal?: boolean;
+  checkDebuginfoStatusHandler?: (buildId: string) => void;
 }
 
 export const defaultValue: Props = {
   loader: <Spinner />,
+  Spinner,
+  noDataPrompt: <NoDataPrompt />,
+  profileExplorer: {
+    PaddingX: 32,
+    metricsGraph: {
+      maxHeightStyle: {
+        default: 'calc(47vw - 24px)',
+        compareMode: 'calc(23.5vw - 24px)',
+      },
+    },
+  },
   perf: {
     onRender: () => {},
     markInteraction: () => {},
   },
+  queryServiceClient: {} as unknown as QueryServiceClient,
+  navigateTo: () => {},
+  enableSourcesView: false,
+  isDarkMode: false,
+  preferencesModal: false,
 };
 
 const ParcaContext = createContext<Props>(defaultValue);
@@ -39,7 +107,11 @@ export const ParcaContextProvider = ({
   children: ReactNode;
   value?: Props;
 }): JSX.Element => {
-  return <ParcaContext.Provider value={value ?? defaultValue}>{children}</ParcaContext.Provider>;
+  return (
+    <ParcaContext.Provider value={{...defaultValue, ...(value ?? {})}}>
+      {children}
+    </ParcaContext.Provider>
+  );
 };
 
 export const useParcaContext = (): Props => {

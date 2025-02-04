@@ -3,6 +3,104 @@
 All notable changes to this project will be documented in this file.
 See [Conventional Commits](https://conventionalcommits.org) for commit guidelines.
 
+## 0.16.71 (2024-11-21)
+
+**Note:** Version bump only for package @parca/icons
+
+## 0.16.70 (2024-06-27)
+
+**Note:** Version bump only for package @parca/icons
+
+## [0.16.69](https://github.com/parca-dev/parca/compare/@parca/icons@0.16.68...@parca/icons@0.16.69) (2024-05-16)
+
+**Note:** Version bump only for package @parca/icons
+
+## [0.16.68](https://github.com/parca-dev/parca/compare/@parca/icons@0.16.67...@parca/icons@0.16.68) (2024-05-14)
+
+**Note:** Version bump only for package @parca/icons
+
+## [0.16.67](https://github.com/parca-dev/parca/compare/@parca/icons@0.16.66...@parca/icons@0.16.67) (2024-05-09)
+
+**Note:** Version bump only for package @parca/icons
+
+## [0.16.66](https://github.com/parca-dev/parca/compare/@parca/icons@0.16.65...@parca/icons@0.16.66) (2024-05-09)
+
+**Note:** Version bump only for package @parca/icons
+
+## [0.16.65](https://github.com/parca-dev/parca/compare/@parca/icons@0.16.64...@parca/icons@0.16.65) (2024-05-01)
+
+**Note:** Version bump only for package @parca/icons
+
+## 0.16.64 (2024-02-28)
+
+# 0.21.0 (2024-02-27)
+
+**Note:** Version bump only for package @parca/icons
+
+## 0.16.63 (2024-02-22)
+
+**Note:** Version bump only for package @parca/icons
+
+## 0.16.62 (2024-01-05)
+
+**Note:** Version bump only for package @parca/icons
+
+## [0.16.61](https://github.com/parca-dev/parca/compare/@parca/icons@0.16.60...@parca/icons@0.16.61) (2023-11-28)
+
+**Note:** Version bump only for package @parca/icons
+
+## 0.16.60 (2023-10-20)
+
+# 0.20.0 (2023-10-20)
+
+**Note:** Version bump only for package @parca/icons
+
+## [0.16.59](https://github.com/parca-dev/parca/compare/@parca/icons@0.16.58...@parca/icons@0.16.59) (2023-10-10)
+
+**Note:** Version bump only for package @parca/icons
+
+## [0.16.58](https://github.com/parca-dev/parca/compare/@parca/icons@0.16.57...@parca/icons@0.16.58) (2023-10-10)
+
+**Note:** Version bump only for package @parca/icons
+
+## [0.16.57](https://github.com/parca-dev/parca/compare/@parca/icons@0.16.56...@parca/icons@0.16.57) (2023-10-10)
+
+**Note:** Version bump only for package @parca/icons
+
+## [0.16.56](https://github.com/parca-dev/parca/compare/@parca/icons@0.16.55...@parca/icons@0.16.56) (2023-10-10)
+
+**Note:** Version bump only for package @parca/icons
+
+## 0.16.55 (2023-09-22)
+
+# 0.19.0 (2023-09-21)
+
+**Note:** Version bump only for package @parca/icons
+
+## 0.16.54 (2023-03-28)
+
+**Note:** Version bump only for package @parca/icons
+
+## 0.16.53 (2023-03-02)
+
+# 0.16.0 (2023-03-01)
+
+**Note:** Version bump only for package @parca/icons
+
+## 0.16.52 (2023-02-16)
+
+**Note:** Version bump only for package @parca/icons
+
+## 0.16.51 (2023-01-11)
+
+**Note:** Version bump only for package @parca/icons
+
+## 0.16.50 (2022-12-20)
+
+# 0.15.0 (2022-12-20)
+
+**Note:** Version bump only for package @parca/icons
+
 ## [0.16.49](https://github.com/parca-dev/parca/compare/ui-v0.16.48...ui-v0.16.49) (2022-10-17)
 
 **Note:** Version bump only for package @parca/icons

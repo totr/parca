@@ -12,10 +12,13 @@
 // limitations under the License.
 
 import {Fragment, useCallback, useEffect, useState} from 'react';
+
 import {Transition} from '@headlessui/react';
-import SuggestionItem from './SuggestionItem';
 import {usePopper} from 'react-popper';
+
 import {useParcaContext} from '@parca/components';
+
+import SuggestionItem from './SuggestionItem';
 
 export class Suggestion {
   type: string;
@@ -49,12 +52,18 @@ interface Props {
   focusedInput: boolean;
   isLabelNamesLoading: boolean;
   isLabelValuesLoading: boolean;
+  shouldTrimPrefix: boolean;
 }
 
 const LoadingSpinner = (): JSX.Element => {
   const {loader: Spinner} = useParcaContext();
 
   return <div className="pt-2 pb-4">{Spinner}</div>;
+};
+
+const transformLabelsForSuggestions = (labelNames: string, shouldTrimPrefix = false): string => {
+  const trimmedLabel = shouldTrimPrefix ? labelNames.split('.').pop() ?? labelNames : labelNames;
+  return trimmedLabel;
 };
 
 const SuggestionsList = ({
@@ -65,6 +74,7 @@ const SuggestionsList = ({
   focusedInput,
   isLabelNamesLoading,
   isLabelValuesLoading,
+  shouldTrimPrefix = false,
 }: Props): JSX.Element => {
   const [popperElement, setPopperElement] = useState<HTMLDivElement | null>(null);
   const {styles, attributes} = usePopper(inputRef, popperElement, {
@@ -219,7 +229,7 @@ const SuggestionsList = ({
           >
             <div
               style={{width: inputRef?.offsetWidth}}
-              className="absolute z-10 max-h-[400px] mt-1 bg-gray-50 dark:bg-gray-900 shadow-lg rounded-md text-base ring-1 ring-black ring-opacity-5 overflow-auto focus:outline-none sm:text-sm"
+              className="absolute z-10 mt-1 max-h-[400px] overflow-auto rounded-md bg-gray-50 text-base shadow-lg ring-1 ring-black ring-opacity-5 focus:outline-none dark:bg-gray-900 sm:text-sm"
             >
               {isLabelNamesLoading ? (
                 <LoadingSpinner />
@@ -231,8 +241,8 @@ const SuggestionsList = ({
                       onHighlight={() => setHighlightedSuggestionIndex(i)}
                       onApplySuggestion={() => applySuggestionWithIndex(i)}
                       onResetHighlight={() => resetHighlight()}
-                      value={l.value}
-                      key={l.value}
+                      value={transformLabelsForSuggestions(l.value, shouldTrimPrefix)}
+                      key={transformLabelsForSuggestions(l.value, shouldTrimPrefix)}
                     />
                   ))}
                 </>

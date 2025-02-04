@@ -1,4 +1,4 @@
-// Copyright 2022 The Parca Authors
+// Copyright 2022-2025 The Parca Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -21,21 +21,22 @@ import (
 	"testing"
 	"time"
 
-	"github.com/apache/arrow/go/v8/arrow/memory"
+	"github.com/apache/arrow/go/v17/arrow/memory"
 	"github.com/go-kit/log"
 	"github.com/polarsignals/frostdb"
 	columnstore "github.com/polarsignals/frostdb"
 	"github.com/polarsignals/frostdb/query"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	profilestorepb "github.com/parca-dev/parca/gen/proto/go/parca/profilestore/v1alpha1"
 	pb "github.com/parca-dev/parca/gen/proto/go/parca/query/v1alpha1"
-	"github.com/parca-dev/parca/pkg/metastore"
-	"github.com/parca-dev/parca/pkg/metastoretest"
+	"github.com/parca-dev/parca/pkg/ingester"
+	"github.com/parca-dev/parca/pkg/kv"
 	"github.com/parca-dev/parca/pkg/parcacol"
+	"github.com/parca-dev/parca/pkg/profile"
 	"github.com/parca-dev/parca/pkg/profilestore"
 )
 
@@ -46,36 +47,36 @@ func Benchmark_Query_Merge(b *testing.B) {
 			ctx := context.Background()
 			logger := log.NewNopLogger()
 			reg := prometheus.NewRegistry()
-			tracer := trace.NewNoopTracerProvider().Tracer("")
+			tracer := noop.NewTracerProvider().Tracer("")
 			col, err := columnstore.New()
 			require.NoError(b, err)
 			colDB, err := col.DB(context.Background(), "parca")
 			require.NoError(b, err)
 
-			schema, err := parcacol.Schema()
+			schema, err := profile.Schema()
 			require.NoError(b, err)
 
 			table, err := colDB.Table(
 				"stacktraces",
-				columnstore.NewTableConfig(schema),
+				columnstore.NewTableConfig(profile.SchemaDefinition()),
 			)
 			require.NoError(b, err)
-			metastore := metastore.NewInProcessClient(metastoretest.NewTestMetastore(
-				b,
-				logger,
-				reg,
-				tracer,
-			))
 
 			fileContent, err := os.ReadFile("../query/testdata/alloc_objects.pb.gz")
 			require.NoError(b, err)
 
+			ingester := ingester.NewIngester(
+				logger,
+				table,
+			)
+
 			store := profilestore.NewProfileColumnStore(
+				reg,
 				logger,
 				tracer,
-				metastore,
-				table,
+				ingester,
 				schema,
+				memory.DefaultAllocator,
 			)
 
 			for j := 0; j < n; j++ {
@@ -103,6 +104,8 @@ func Benchmark_Query_Merge(b *testing.B) {
 
 			require.NoError(b, table.EnsureCompaction())
 
+			mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+			defer mem.AssertSize(b, 0)
 			api := NewColumnQueryAPI(
 				logger,
 				tracer,
@@ -111,12 +114,16 @@ func Benchmark_Query_Merge(b *testing.B) {
 					logger,
 					tracer,
 					query.NewEngine(
-						memory.DefaultAllocator,
+						mem,
 						colDB.TableProvider(),
 					),
 					"stacktraces",
-					metastore,
+					nil,
+					mem,
 				),
+				mem,
+				parcacol.NewArrowToProfileConverter(tracer, kv.NewKeyMaker()),
+				nil,
 			)
 			b.ResetTimer()
 
@@ -131,7 +138,7 @@ func Benchmark_Query_Merge(b *testing.B) {
 						},
 					},
 					//nolint:staticcheck // SA1019: Fow now we want to support these APIs
-					ReportType: pb.QueryRequest_REPORT_TYPE_FLAMEGRAPH_UNSPECIFIED,
+					ReportType: pb.QueryRequest_REPORT_TYPE_FLAMEGRAPH_ARROW,
 				})
 				require.NoError(b, err)
 			}
@@ -147,15 +154,12 @@ func Benchmark_ProfileTypes(b *testing.B) {
 
 	ctx := context.Background()
 	logger := log.NewNopLogger()
-	reg := prometheus.NewRegistry()
-	tracer := trace.NewNoopTracerProvider().Tracer("")
+	tracer := noop.NewTracerProvider().Tracer("")
 	col, err := columnstore.New(
 		frostdb.WithWAL(),
 		frostdb.WithStoragePath("../../data"),
 	)
 	require.NoError(b, err)
-
-	require.NoError(b, col.ReplayWALs(ctx))
 
 	colDB, err := col.DB(context.Background(), "parca")
 	require.NoError(b, err)
@@ -165,13 +169,9 @@ func Benchmark_ProfileTypes(b *testing.B) {
 	require.NoError(b, table.EnsureCompaction())
 
 	require.NoError(b, err)
-	m := metastore.NewInProcessClient(metastoretest.NewTestMetastore(
-		b,
-		logger,
-		reg,
-		tracer,
-	))
 
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(b, 0)
 	api := NewColumnQueryAPI(
 		logger,
 		tracer,
@@ -180,12 +180,16 @@ func Benchmark_ProfileTypes(b *testing.B) {
 			logger,
 			tracer,
 			query.NewEngine(
-				memory.DefaultAllocator,
+				mem,
 				colDB.TableProvider(),
 			),
 			"stacktraces",
-			m,
+			nil,
+			mem,
 		),
+		mem,
+		parcacol.NewArrowToProfileConverter(tracer, kv.NewKeyMaker()),
+		nil,
 	)
 	b.ResetTimer()
 

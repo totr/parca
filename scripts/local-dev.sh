@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Copyright 2022 The Parca Authors
+# Copyright 2022-2025 The Parca Authors
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -65,7 +65,7 @@ function up() {
         mk start \
             --driver="${DRIVER}" \
             --nodes="${NODE_COUNT}" \
-            --kubernetes-version=v1.23.3 \
+            --kubernetes-version=stable \
             --cpus=4 \
             --memory=8gb \
             --disk-size=80000mb \
@@ -98,6 +98,10 @@ function deploy() {
     echo "Deploying dev environment"
     echo "----------------------------------------------------------"
     # Deploy all generated manifests
+    kubectl create namespace parca --dry-run=client -o yaml | kubectl apply -f -
+    kubectl label --overwrite ns parca \
+        pod-security.kubernetes.io/enforce=privileged \
+        pod-security.kubernetes.io/enforce-version=v1.27
     kubectl apply -R -f ./deploy/tilt
 }
 

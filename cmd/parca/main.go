@@ -1,4 +1,4 @@
-// Copyright 2022 The Parca Authors
+// Copyright 2022-2025 The Parca Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -22,6 +22,7 @@ import (
 	"github.com/common-nighthawk/go-figure"
 	"github.com/go-kit/log/level"
 	"github.com/prometheus/client_golang/prometheus"
+	"go.uber.org/automaxprocs/maxprocs"
 
 	"github.com/parca-dev/parca/pkg/parca"
 )
@@ -45,12 +46,18 @@ func main() {
 	serverStr := figure.NewColorFigure("Parca", "roman", "cyan", true)
 	serverStr.Print()
 
-	logger := parca.NewLogger(flags.LogLevel, parca.LogFormatLogfmt, "parca")
+	logger := parca.NewLogger(flags.Logs.Level, flags.Logs.Format, "parca")
 	level.Debug(logger).Log("msg", "parca initialized",
 		"version", version,
 		"commit", commit,
 		"config", fmt.Sprint(flags),
 	)
+
+	if _, err := maxprocs.Set(maxprocs.Logger(func(format string, a ...interface{}) {
+		level.Debug(logger).Log("msg", fmt.Sprintf(format, a...))
+	})); err != nil {
+		level.Warn(logger).Log("msg", "failed to set GOMAXPROCS automatically", "err", err)
+	}
 
 	registry := prometheus.NewRegistry()
 

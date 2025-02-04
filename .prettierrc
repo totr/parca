@@ -3,16 +3,19 @@
   "singleQuote": true,
   "bracketSpacing": false,
   "arrowParens": "avoid",
-  "overrides": [
-    {
-      "files": "ui/packages/app/grafana**/**/*",
-      "options": {
-        "trailingComma": "es5",
-        "singleQuote": true,
-        "bracketSpacing": true,
-        "arrowParens": "always",
-        "printWidth": 120
-      }
-    }
-  ]
+  "importOrder": [
+    "^(react/(.*)$)|^(react$)",
+    "<THIRD_PARTY_MODULES>",
+    "",
+    "^@parca/(.*)$",
+    "",
+    "^[./]"
+  ],
+  "trailingComma": "es5",
+  "importOrderSeparation": true,
+  "importOrderSortSpecifiers": true,
+  "importOrderMergeDuplicateImports": true,
+  "importOrderBuiltinModulesToTop": true,
+  "importOrderCombineTypeAndValueImports": true,
+  "plugins": ["@ianvs/prettier-plugin-sort-imports"]
 }

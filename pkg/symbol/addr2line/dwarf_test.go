@@ -1,4 +1,4 @@
-// Copyright 2022 The Parca Authors
+// Copyright 2022-2025 The Parca Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -15,6 +15,7 @@
 package addr2line
 
 import (
+	"context"
 	"debug/elf"
 	"testing"
 
@@ -28,23 +29,25 @@ import (
 func TestDwarfSymbolizer(t *testing.T) {
 	logger := log.NewNopLogger()
 	demangler := demangle.NewDemangler("simple", true)
-	elfFile, err := elf.Open("testdata/basic-cpp-no-fp-with-debuginfo")
+	filename := "testdata/basic-cpp-no-fp-with-debuginfo"
+	elfFile, err := elf.Open(filename)
 	if err != nil {
 		panic("failure opening elf file")
 	}
 	defer elfFile.Close()
 
-	dwarf, err := DWARF(logger, elfFile, demangler)
+	dwarf, err := DWARF(logger, filename, elfFile, demangler)
 	if err != nil {
 		panic("failure reading DWARF file")
 	}
-	gotLines, err := dwarf.PCToLines(0x401125)
+	gotLines, err := dwarf.PCToLines(context.Background(), 0x401125)
 	if err != nil {
 		panic("failure reading lines")
 	}
 
 	require.Equal(t, &metastorev1alpha1.Function{
-		Name:     "top2",
-		Filename: "src/basic-cpp.cpp",
+		Name:      "top2",
+		Filename:  "src/basic-cpp.cpp",
+		StartLine: 8,
 	}, gotLines[0].Function)
 }

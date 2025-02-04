@@ -3,6 +3,124 @@
 All notable changes to this project will be documented in this file.
 See [Conventional Commits](https://conventionalcommits.org) for commit guidelines.
 
+## 0.16.78 (2024-11-21)
+
+**Note:** Version bump only for package @parca/parser
+
+## 0.16.77 (2024-07-01)
+
+**Note:** Version bump only for package @parca/parser
+
+## 0.16.76 (2024-06-27)
+
+**Note:** Version bump only for package @parca/parser
+
+## 0.16.75 (2024-06-06)
+
+**Note:** Version bump only for package @parca/parser
+
+## [0.16.74](https://github.com/parca-dev/parca/compare/@parca/parser@0.16.73...@parca/parser@0.16.74) (2024-05-16)
+
+**Note:** Version bump only for package @parca/parser
+
+## [0.16.73](https://github.com/parca-dev/parca/compare/@parca/parser@0.16.72...@parca/parser@0.16.73) (2024-05-14)
+
+**Note:** Version bump only for package @parca/parser
+
+## [0.16.72](https://github.com/parca-dev/parca/compare/@parca/parser@0.16.71...@parca/parser@0.16.72) (2024-05-09)
+
+**Note:** Version bump only for package @parca/parser
+
+## [0.16.71](https://github.com/parca-dev/parca/compare/@parca/parser@0.16.70...@parca/parser@0.16.71) (2024-05-09)
+
+**Note:** Version bump only for package @parca/parser
+
+## [0.16.70](https://github.com/parca-dev/parca/compare/@parca/parser@0.16.69...@parca/parser@0.16.70) (2024-05-01)
+
+**Note:** Version bump only for package @parca/parser
+
+## 0.16.69 (2024-02-28)
+
+# 0.21.0 (2024-02-27)
+
+**Note:** Version bump only for package @parca/parser
+
+## 0.16.68 (2023-11-21)
+
+**Note:** Version bump only for package @parca/parser
+
+## 0.16.67 (2023-11-18)
+
+**Note:** Version bump only for package @parca/parser
+
+## [0.16.66](https://github.com/parca-dev/parca/compare/@parca/parser@0.16.65...@parca/parser@0.16.66) (2023-10-22)
+
+**Note:** Version bump only for package @parca/parser
+
+## 0.16.65 (2023-10-22)
+
+**Note:** Version bump only for package @parca/parser
+
+## 0.16.64 (2023-10-20)
+
+# 0.20.0 (2023-10-20)
+
+**Note:** Version bump only for package @parca/parser
+
+## [0.16.63](https://github.com/parca-dev/parca/compare/@parca/parser@0.16.62...@parca/parser@0.16.63) (2023-10-10)
+
+**Note:** Version bump only for package @parca/parser
+
+## [0.16.62](https://github.com/parca-dev/parca/compare/@parca/parser@0.16.61...@parca/parser@0.16.62) (2023-10-10)
+
+**Note:** Version bump only for package @parca/parser
+
+## [0.16.61](https://github.com/parca-dev/parca/compare/@parca/parser@0.16.60...@parca/parser@0.16.61) (2023-10-10)
+
+**Note:** Version bump only for package @parca/parser
+
+## [0.16.60](https://github.com/parca-dev/parca/compare/@parca/parser@0.16.59...@parca/parser@0.16.60) (2023-10-10)
+
+**Note:** Version bump only for package @parca/parser
+
+## [0.16.59](https://github.com/parca-dev/parca/compare/@parca/parser@0.16.58...@parca/parser@0.16.59) (2023-10-10)
+
+**Note:** Version bump only for package @parca/parser
+
+## [0.16.58](https://github.com/parca-dev/parca/compare/@parca/parser@0.16.57...@parca/parser@0.16.58) (2023-09-24)
+
+**Note:** Version bump only for package @parca/parser
+
+## 0.16.57 (2023-09-23)
+
+**Note:** Version bump only for package @parca/parser
+
+## 0.16.56 (2023-09-22)
+
+# 0.19.0 (2023-09-21)
+
+**Note:** Version bump only for package @parca/parser
+
+## 0.16.55 (2023-03-02)
+
+# 0.16.0 (2023-03-01)
+
+**Note:** Version bump only for package @parca/parser
+
+## 0.16.54 (2023-02-16)
+
+**Note:** Version bump only for package @parca/parser
+
+## 0.16.53 (2023-01-17)
+
+**Note:** Version bump only for package @parca/parser
+
+## 0.16.52 (2022-12-20)
+
+# 0.15.0 (2022-12-20)
+
+**Note:** Version bump only for package @parca/parser
+
 ## 0.16.51 (2022-11-29)
 
 **Note:** Version bump only for package @parca/parser
